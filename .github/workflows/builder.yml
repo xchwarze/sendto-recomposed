@@ -1,0 +1,49 @@
+name: Build release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, x86]
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Initialize MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+          vsversion: '17.0'
+
+      - name: Compile version resources
+        shell: cmd
+        run: |
+          rc.exe /r sendto.rc
+
+      - name: Build with MSVC
+        shell: cmd
+        run: |
+          cl /O2 /EHsc /MD /DUNICODE /D_UNICODE ^
+            sendto.c sendto.res ^
+            ole32.lib shell32.lib shlwapi.lib comctl32.lib user32.lib gdi32.lib uuid.lib ^
+            /link /SUBSYSTEM:WINDOWS
+
+      - name: Embed manifest
+        shell: cmd
+        run: |
+          mt.exe -nologo ^
+            -manifest sendto.manifest ^
+            -outputresource:sendto.exe;#1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sendto-${{ matrix.arch }}
+          path: sendto.exe

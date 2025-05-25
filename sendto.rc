@@ -1,0 +1,41 @@
+// sendto_resources.rc
+
+// Resource IDs
+#define IDI_APP_ICON 101
+
+#include <windows.h>
+#include <winver.h>
+
+// Icon – must live alongside este .rc
+IDI_APP_ICON ICON "sendto.ico"
+
+///////////////////////////////////////////////////////////////////////////////
+// Version info
+
+1 VERSIONINFO
+ FILEVERSION    1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK  0x3fL
+ FILEOS         VOS__WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"  // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "xchwarze\0"
+            VALUE "FileDescription",  "SendTo Recomposed\0"
+            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "InternalName",     "sendto.exe\0"
+            VALUE "OriginalFilename", "sendto.exe\0"
+            VALUE "ProductName",      "SendTo Recomposed\0"
+            VALUE "ProductVersion",   "1.0.0.0\0"
+            VALUE "LegalCopyright",   "© 2025 xchwarze. All rights reserved.\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
