@@ -13,16 +13,17 @@
 #include <shlwapi.h>
 #include <commctrl.h>
 #include <commoncontrols.h> /* for IID_IImageList */
-#include <unknwn.h>
 #include <shellapi.h>
 #include <strsafe.h>
 #include <shobjidl.h>
 #include <stdbool.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 #define MAX_DEPTH 4
 #define MAX_LOCAL_PATH 32767
@@ -41,7 +42,9 @@
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
+static HMODULE uxThemeModule = NULL;
 static LPSHELLFOLDER desktopShellFolder = NULL;
+static HIMAGELIST smallImageList = NULL;
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20  // Missing in older SDKs
@@ -68,11 +71,6 @@ static void OptInDarkPopupMenus(void)
     typedef PreferredAppMode (WINAPI *SetPreferredAppMode_t)(PreferredAppMode);
     typedef BOOL (WINAPI *FlushMenuThemes_t)(void);
 
-    HMODULE uxThemeModule = LoadLibraryW(L"uxtheme.dll");
-    if (!uxThemeModule) {
-        return;
-    }
-
     SetPreferredAppMode_t pSetPreferredAppMode =
         (SetPreferredAppMode_t)GetProcAddress(uxThemeModule, MAKEINTRESOURCEA(135));
     FlushMenuThemes_t pFlushMenuThemes =
@@ -93,22 +91,13 @@ static void OptInDarkPopupMenus(void)
  * Return TRUE when the user has “Dark” selected for *Apps* in Settings.
  * Relies on uxtheme!ShouldAppsUseDarkMode (exported by ordinal 132).
  */
-static inline BOOL AppUsesDarkTheme(void)
+static BOOL AppUsesDarkTheme(void)
 {
-    // uxtheme.dll is always loaded in a GUI process, but be safe.
-    HMODULE uxThemeModule = GetModuleHandleW(L"uxtheme.dll");
-    if (!uxThemeModule) {
-        uxThemeModule = LoadLibraryW(L"uxtheme.dll");
-    }
-    if (!uxThemeModule) {
-        return FALSE;
-    }
-
     typedef BOOL (WINAPI *ShouldAppsUseDarkMode_t)(void);
+
+    // Ordinals are stable since 1809
     ShouldAppsUseDarkMode_t ShouldAppsUseDarkMode =
-        (ShouldAppsUseDarkMode_t)GetProcAddress(
-            uxThemeModule,
-            MAKEINTRESOURCEA(132)); // ordinal-only export
+        (ShouldAppsUseDarkMode_t)GetProcAddress(uxThemeModule, MAKEINTRESOURCEA(132));
 
     return ShouldAppsUseDarkMode && ShouldAppsUseDarkMode();
 }
@@ -121,7 +110,7 @@ static inline BOOL AppUsesDarkTheme(void)
  *
  * @param hwnd  Window handle (can be your hidden owner window).
  */
-static inline void ApplyDarkThemeIfNeeded(HWND hwnd)
+static void ApplyDarkThemeIfNeeded(HWND hwnd)
 {
     if (!hwnd) {
         return;
@@ -146,7 +135,7 @@ static inline void ApplyDarkThemeIfNeeded(HWND hwnd)
  * @param      segment2   Second path segment.
  * @return     S_OK on success, E_OUTOFMEMORY if allocation fails, E_FAIL if combine fails.
  */
-static HRESULT combinePath(PWSTR *outPath, size_t maxChars, PCWSTR segment1, PCWSTR segment2) {
+static HRESULT CombinePath(PWSTR *outPath, size_t maxChars, PCWSTR segment1, PCWSTR segment2) {
     *outPath = malloc(maxChars * sizeof **outPath);
     if (!*outPath) {
         return E_OUTOFMEMORY;
@@ -196,7 +185,7 @@ typedef struct {
  * @param need  Desired minimum capacity.
  * @return      true on success, false on OOM.
  */
-static bool vectorEnsureCapacity(MenuVector *vec, UINT need)
+static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 {
     if (need <= vec->capacity) {
         return true;
@@ -224,10 +213,10 @@ static bool vectorEnsureCapacity(MenuVector *vec, UINT need)
  * @return      true on success, false on OOM — if false the caller still
  *              owns @path/@icon and must free/delete them.
  */
-static bool vectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
+static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
 {
     // If capacity growth fails, we do *not* consume the resources.
-    if (!vectorEnsureCapacity(vec, vec->count + 1)) {
+    if (!VectorEnsureCapacity(vec, vec->count + 1)) {
         return false;
     }
 
@@ -243,7 +232,7 @@ static bool vectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
  *
  * @param vec  Vector to wipe.
  */
-static void vectorDestroy(MenuVector *vec)
+static void VectorDestroy(MenuVector *vec)
 {
     for (UINT i = 0; i < vec->count; ++i) {
         free(vec->items[i].path);
@@ -258,25 +247,22 @@ static void vectorDestroy(MenuVector *vec)
 /* System small-icon cache                                                    */
 /* -------------------------------------------------------------------------- */
 
-// Global handle to the shared small icon list (AddRef'd)
-static HIMAGELIST g_smallImageList = NULL;
-
 /**
  * ensureSmallImageList – initialize the global small-icon image list.
  *
  * Tries SHGetImageList(SHIL_SMALL). On failure, falls back to
  * SHGetFileInfoW on the Windows directory and AddRefs it.
  */
-static void ensureSmallImageList(void)
+static void EnsureSmallImageList(void)
 {
-    if (g_smallImageList) {
+    if (smallImageList) {
         return;  // already initialized
     }
 
     // Try COM-based retrieval first
-    HRESULT result = SHGetImageList(SHIL_SMALL, &IID_IImageList, (void**)&g_smallImageList);
+    HRESULT result = SHGetImageList(SHIL_SMALL, &IID_IImageList, (void**)&smallImageList);
     if (result == S_OK) {
-        return;  // success, we own g_smallImageList
+        return;  // success, we own smallImageList
     }
 
     // Fallback: use Windows directory for reliable shell image list
@@ -291,14 +277,14 @@ static void ensureSmallImageList(void)
             SHGFI_SYSICONINDEX | SHGFI_SMALLICON
         );
         if (fallbackList) {
-            g_smallImageList = fallbackList;  // only assign if valid
+            smallImageList = fallbackList;  // only assign if valid
         }
     }
 
     // AddRef so our copy stays valid after shell unloads
-    if (g_smallImageList) {
+    if (smallImageList) {
         // image list is owned by shell. AddRef to keep it alive
-        IUnknown *pUnk = (IUnknown*)g_smallImageList;
+        IUnknown *pUnk = (IUnknown*)smallImageList;
         if (pUnk) {
             pUnk->lpVtbl->AddRef(pUnk);
         }
@@ -307,16 +293,18 @@ static void ensureSmallImageList(void)
 
 /**
  * cleanupSmallImageList – release the global small-icon image list.
+ *
+ * @return        void; does nothing if the list is not initialized.
  */
-static void cleanupSmallImageList(void)
+static void CleanupSmallImageList(void)
 {
-    if (!g_smallImageList) {
+    if (!smallImageList) {
         return;
     }
 
     // Detach global reference before releasing
-    IUnknown *pUnk = (IUnknown*)g_smallImageList;
-    g_smallImageList = NULL;
+    IUnknown *pUnk = (IUnknown*)smallImageList;
+    smallImageList = NULL;
     pUnk->lpVtbl->Release(pUnk);
 }
 
@@ -327,7 +315,7 @@ static void cleanupSmallImageList(void)
  * @param height  Desired bitmap height in pixels.
  * @return        New HBITMAP or NULL on failure.
  */
-static HBITMAP createDIBSection32(int width, int height)
+static HBITMAP CreateDIBSection32(int width, int height)
 {
     // Describe a 32-bit top-down DIB
     BITMAPINFO bmi;
@@ -348,20 +336,20 @@ static HBITMAP createDIBSection32(int width, int height)
  * @param iconIndex  Zero-based index into the small icon list.
  * @return           HBITMAP (32-bit ARGB) owned by caller, or NULL on failure.
  */
-static HBITMAP makeIconBitmap(int iconIndex)
+static HBITMAP MakeIconBitmap(int iconIndex)
 {
-    ensureSmallImageList();
-    if (!g_smallImageList) {
+    EnsureSmallImageList();
+    if (!smallImageList) {
         return NULL;  // no image list available
     }
 
     int iconWidth, iconHeight;
-    if (!ImageList_GetIconSize(g_smallImageList, &iconWidth, &iconHeight)) {
+    if (!ImageList_GetIconSize(smallImageList, &iconWidth, &iconHeight)) {
         return NULL;  // failed to retrieve dimensions
     }
 
     // Allocate a matching DIB
-    HBITMAP bitmap = createDIBSection32(iconWidth, iconHeight);
+    HBITMAP bitmap = CreateDIBSection32(iconWidth, iconHeight);
     if (!bitmap) {
         return NULL;
     }
@@ -370,7 +358,7 @@ static HBITMAP makeIconBitmap(int iconIndex)
     HDC drawDC = CreateCompatibleDC(NULL);
     if (drawDC) {
         HGDIOBJ oldObj = SelectObject(drawDC, bitmap);
-        ImageList_Draw(g_smallImageList, iconIndex, drawDC, 0, 0, ILD_TRANSPARENT);
+        ImageList_Draw(smallImageList, iconIndex, drawDC, 0, 0, ILD_TRANSPARENT);
         SelectObject(drawDC, oldObj);
         DeleteDC(drawDC);
     }
@@ -384,7 +372,7 @@ static HBITMAP makeIconBitmap(int iconIndex)
  * @param iconHandle  Source HICON (ownership transferred; this function destroys it).
  * @return            HBITMAP or NULL on failure.
  */
-static HBITMAP dibFromIcon(HICON iconHandle)
+static HBITMAP DibFromIcon(HICON iconHandle)
 {
     if (!iconHandle) {
         return NULL;
@@ -407,7 +395,7 @@ static HBITMAP dibFromIcon(HICON iconHandle)
     }
 
     // allocate DIB section; pointer to its bits is discarded here
-    HBITMAP dibBitmap = createDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
+    HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
     if (dibBitmap) {
         // create temporary DC
         HDC drawDC = CreateCompatibleDC(NULL);
@@ -434,7 +422,7 @@ static HBITMAP dibFromIcon(HICON iconHandle)
  * For files: returns file icon (adds .lnk overlay if necessary).
  * Falls back to system list if SHGetFileInfo fails.
  */
-static HBITMAP iconForPath(PCWSTR filePath)
+static HBITMAP IconForPath(PCWSTR filePath)
 {
     SHFILEINFOW info;
     UINT flags;
@@ -443,7 +431,7 @@ static HBITMAP iconForPath(PCWSTR filePath)
     if (PathIsDirectoryW(filePath)) {
         flags = SHGFI_ICON | SHGFI_SMALLICON;
         if (SHGetFileInfoW(filePath, 0, &info, sizeof info, SHGFI_ICON | SHGFI_SMALLICON)) {
-            HBITMAP result = dibFromIcon(info.hIcon);
+            HBITMAP result = DibFromIcon(info.hIcon);
             DestroyIcon(info.hIcon);
             if (result) {
                 return result;
@@ -463,7 +451,7 @@ static HBITMAP iconForPath(PCWSTR filePath)
     
     // primary file icon (with overlay)
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof info, flags)) {
-        HBITMAP result = dibFromIcon(info.hIcon);
+        HBITMAP result = DibFromIcon(info.hIcon);
         DestroyIcon(info.hIcon);
         if (result) {
             return result;
@@ -473,7 +461,7 @@ static HBITMAP iconForPath(PCWSTR filePath)
     // fallback to system image list by index
     flags = SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof info, flags)) {
-        return makeIconBitmap(info.iIcon);
+        return MakeIconBitmap(info.iIcon);
     }
     
     return NULL;
@@ -487,10 +475,10 @@ static HBITMAP iconForPath(PCWSTR filePath)
 /**
  * skipEntry – filter out "." / ".." and hidden or system files.
  *
- * @param  fd  WIN32_FIND_DATA of current entry.
- * @return     TRUE if the entry must be ignored.
+ * @param  findData  WIN32_FIND_DATA of current entry.
+ * @return           TRUE if the entry must be ignored.
  */
-static inline BOOL skipEntry(const WIN32_FIND_DATAW *findData)
+static inline BOOL SkipEntry(const WIN32_FIND_DATAW *findData)
 {
     return (findData->dwFileAttributes &
             (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) ||
@@ -499,9 +487,17 @@ static inline BOOL skipEntry(const WIN32_FIND_DATAW *findData)
 }
 
 /**
- * addFileItem – insert a leaf item with icon into @menu and @items.
+ * AddFileItem – insert a leaf item with icon into a menu and track it in a vector.
+ *
+ * @param parentMenu Target HMENU to receive the new item.
+ * @param fileName   Null-terminated wide string of the file name (with extension).
+ * @param bitmap     HBITMAP icon to display, or NULL for no icon.
+ * @param commandId  Unique command identifier for the menu entry.
+ * @param vec        Pointer to a MenuVector to store the path and bitmap.
+ * @param pathCopy   Heap-allocated copy of the file path; freed on failure.
+ * @return           void; on push failure, frees pathCopy and bitmap if set.
  */
-static void addFileItem(
+static void AddFileItem(
     HMENU       parentMenu,
     PCWSTR      fileName,
     HBITMAP     bitmap,
@@ -510,7 +506,7 @@ static void addFileItem(
     PWSTR       pathCopy
 ) {
     // vectorPush may fail; then we must clean up our resources
-    if (!vectorPush(vec, pathCopy, bitmap)) {
+    if (!VectorPush(vec, pathCopy, bitmap)) {
         free(pathCopy);
         if (bitmap) DeleteObject(bitmap);
         return;
@@ -524,17 +520,28 @@ static void addFileItem(
         *ext = L'\0';
     }
 
-    MENUITEMINFOW mi = { sizeof mi, MIIM_ID | MIIM_STRING | MIIM_BITMAP };
-    mi.wID        = commandId;
-    mi.dwTypeData = caption;
-    mi.hbmpItem   = bitmap;
-    InsertMenuItemW(parentMenu, commandId, FALSE, &mi);
+    // Prepare the MENUITEMINFO structure for a bitmap + submenu entry
+    MENUITEMINFOW itemInfo = { 0 };
+    itemInfo.cbSize     = sizeof(itemInfo);
+    itemInfo.fMask      = MIIM_ID | MIIM_STRING | MIIM_BITMAP;
+    itemInfo.wID        = commandId;
+    itemInfo.dwTypeData = caption;
+    itemInfo.hbmpItem   = bitmap;
+
+    InsertMenuItemW(parentMenu, commandId, FALSE, &itemInfo);
 }
 
 /**
- * addDirectoryItem – create a submenu (recursion handled by caller).
+ * AddDirectoryItem – insert a submenu entry with icon and context help ID.
+ *
+ * @param parentMenu    HMENU to append the new directory item.
+ * @param directoryName Null-terminated wide string of the directory label.
+ * @param bitmap        HBITMAP icon to display alongside the label.
+ * @param subMenu       HMENU handle for the drop-down submenu.
+ * @param helpId        DWORD context-help identifier for the submenu.
+ * @return              void.
  */
-static void addDirectoryItem(
+static void AddDirectoryItem(
     HMENU       parentMenu,
     PCWSTR      directoryName,
     HBITMAP     bitmap,
@@ -558,10 +565,11 @@ static void addDirectoryItem(
     );
 
     // Associate a help/context-ID with the submenu itself
-    MENUINFO menuInfo = { 0 };
-    menuInfo.cbSize          = sizeof(menuInfo);
-    menuInfo.fMask           = MIM_HELPID;          // we’re setting dwContextHelpID
-    menuInfo.dwContextHelpID = helpId;              // ID used to look up real path
+    MENUINFO menuInfo        = { sizeof(menuInfo) };
+    menuInfo.fMask           = MIM_HELPID | MIM_STYLE; // we’re setting dwContextHelpID
+    menuInfo.dwContextHelpID = helpId;                 // ID used to look up real path
+    menuInfo.dwStyle         = MNS_AUTODISMISS
+                               | MNS_NOTIFYBYPOS;
 
     SetMenuInfo(subMenu, &menuInfo);
 }
@@ -576,7 +584,7 @@ static void addDirectoryItem(
  * @param items       Pointer to a vector where (path, bitmap) pairs are stored.
  * @return            S_OK on success, or an HRESULT error code on failure.
  */
-static HRESULT enumerateFolder(
+static HRESULT EnumerateFolder(
     HMENU       menu,
     PCWSTR      directory,
     UINT       *nextCmdId,
@@ -595,7 +603,7 @@ static HRESULT enumerateFolder(
 
     // Build the search pattern "directory\\*"
     PWSTR pattern = NULL;
-    HRESULT hr = combinePath(&pattern, MAX_LOCAL_PATH, directory, L"*");
+    HRESULT hr = CombinePath(&pattern, MAX_LOCAL_PATH, directory, L"*");
     if (FAILED(hr)) {
         return hr;
     }
@@ -604,28 +612,29 @@ static HRESULT enumerateFolder(
     WIN32_FIND_DATAW findData;
     HANDLE hFind = FindFirstFileW(pattern, &findData);
     free(pattern);
-    if (hFind == INVALID_HANDLE_VALUE)
+    if (hFind == INVALID_HANDLE_VALUE) {
         return HRESULT_FROM_WIN32(GetLastError());
+    }
 
     do {
         // Skip "." , "..", hidden, or system entries
-        if (skipEntry(&findData))
+        if (SkipEntry(&findData))
             continue;
 
         // Build full child path
         PWSTR childPath = NULL;
-        hr = combinePath(&childPath, MAX_LOCAL_PATH, directory, findData.cFileName);
+        hr = CombinePath(&childPath, MAX_LOCAL_PATH, directory, findData.cFileName);
         if (FAILED(hr)) {
             continue;
         }
 
         // Retrieve icon bitmap for this entry
-        HBITMAP bmp = iconForPath(childPath);
+        HBITMAP bmp = IconForPath(childPath);
 
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // For subdirectories, create a new submenu
             HMENU subMenu = CreatePopupMenu();
-           if (!subMenu) {
+            if (!subMenu) {
                 // avoid inserting into NULL menu; clean up and skip
                 free(childPath);
                 if (bmp) {
@@ -635,17 +644,18 @@ static HRESULT enumerateFolder(
             }
 
             // Insert directory item with icon and context-help ID
-            addDirectoryItem(menu, findData.cFileName, bmp, subMenu, *nextCmdId);
+            AddDirectoryItem(menu, findData.cFileName,
+                             bmp, subMenu, *nextCmdId);
             
             // Store in vector for later invocation
-            vectorPush(items, childPath, bmp);
+            VectorPush(items, childPath, bmp);
             (*nextCmdId)++;
             
             // Recurse into the subdirectory
-            enumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
+            EnumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
         } else {
             // For files, insert a regular file item
-            addFileItem(menu, findData.cFileName, bmp, (*nextCmdId)++,
+            AddFileItem(menu, findData.cFileName, bmp, (*nextCmdId)++,
                         items, childPath);
         }
 
@@ -653,6 +663,7 @@ static HRESULT enumerateFolder(
 
     // Clean up enumeration handle
     FindClose(hFind);
+
     return S_OK;
 }
 
@@ -678,7 +689,7 @@ static LPITEMIDLIST PathToPIDL(HWND hwndOwner, PCWSTR pszPath)
     DWORD attrs = 0;
 
     // Parse the display name into a PIDL
-    HRESULT hr = desktopShellFolder->lpVtbl->ParseDisplayName(
+    const HRESULT hr = desktopShellFolder->lpVtbl->ParseDisplayName(
         desktopShellFolder,
         hwndOwner,
         NULL,
@@ -806,7 +817,7 @@ static HRESULT GetShellInterfaceForPaths(
     }
 
     // bind to the requested COM interface on these PIDLs
-    HRESULT hr = GetShellInterfaceForPIDLs(
+    const HRESULT hr = GetShellInterfaceForPIDLs(
         hwndOwner,
         pidlArray,
         pathCount,
@@ -838,11 +849,11 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
         return;
     }
 
-    POINTL pt     = { 0 };
+    const POINTL pt     = { 0 };
     DWORD  effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
 
     // drag into the target
-    HRESULT hrEnter = dropTarget->lpVtbl->DragEnter(
+    const HRESULT hrEnter = dropTarget->lpVtbl->DragEnter(
         dropTarget, dataObj, MK_LBUTTON, pt, &effect
     );
 
@@ -869,15 +880,14 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
  */
 static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR *argv)
 {
-    HRESULT      hr;
     IDataObject *pDataObj    = NULL;
     IDropTarget *pDropTarget = NULL;
 
     // Build IDataObject from the array of source file paths
-    hr = GetShellInterfaceForPaths(
+    HRESULT hr = GetShellInterfaceForPaths(
         owner,
-        (PCWSTR*)(argv + 1),     // skip argv[0]
-        argc - 1,                // number of files
+        (PCWSTR*)(argv + 1), // skip argv[0]
+        argc - 1, // number of files
         &IID_IDataObject,
         (void**)&pDataObj
     );
@@ -931,13 +941,18 @@ static BOOL InitializeApplication(void)
     }
 
     // complete drag and drop setup
-    HRESULT hr = SHGetDesktopFolder(&desktopShellFolder);
+    const HRESULT hr = SHGetDesktopFolder(&desktopShellFolder);
     if (FAILED(hr)) {
         OutputDebugStringW(L"[SendTo+] SHGetDesktopFolder failed\n");
         return FALSE;
     }
 
-    // add darkmode support
+    // add dark mode support
+    uxThemeModule = LoadLibraryW(L"uxtheme.dll");
+    if (!uxThemeModule) {
+        return FALSE;
+    }
+
     OptInDarkPopupMenus();
 
     return TRUE;
@@ -1009,7 +1024,7 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
 
     // recursively fill menu and items vector
     UINT initialCmdId = 1;                     // start command IDs at 1
-    HRESULT hr = enumerateFolder(
+    const HRESULT hr = EnumerateFolder(
         *outPopup,
         sendToDir,
         &initialCmdId,                         // pass address of a real variable
@@ -1034,7 +1049,7 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
 static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
 {
     const wchar_t CLASS_NAME[] = L"SendToOwnerWindow";
-    WNDCLASSEXW wc = {
+    const WNDCLASSEXW wc = {
         .cbSize        = sizeof(WNDCLASSEXW),
         .lpfnWndProc   = DefWindowProcW,
         .hInstance     = hInstance,
@@ -1058,7 +1073,11 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
         NULL
     );
     if (hwnd) {
+        // theme support setup
+        //SetWindowTheme(hwnd, L"ExplorerMenu", NULL);
         ApplyDarkThemeIfNeeded(hwnd);
+
+        // menu logic
         ShowWindow(hwnd, SW_HIDE);
         SetForegroundWindow(hwnd);
     } else {
@@ -1081,7 +1100,7 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
     // get cursor position for menu location
     GetCursorPos(&cursor);
 
-    UINT cmd = TrackPopupMenuEx(
+    const UINT cmd = TrackPopupMenuEx(
         popup,
         TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_LEFTBUTTON,
         cursor.x, cursor.y,
@@ -1110,7 +1129,7 @@ static void CleanupApplication(
     MenuVector *items
 ) {
     // free menu item data
-    vectorDestroy(items);
+    VectorDestroy(items);
     DestroyMenu(popupMenu);
 
     // free directory path
@@ -1126,7 +1145,7 @@ static void CleanupApplication(
     SAFE_RELEASE(desktopShellFolder);
 
     // release global image list and OLE
-    cleanupSmallImageList();
+    CleanupSmallImageList();
     OleUninitialize();
 }
 
@@ -1150,18 +1169,6 @@ int WINAPI wWinMain(
     (void)lpCmdLine;
     (void)nCmdShow;
 
-    WCHAR buf[256];
-    StringCchPrintfW(buf, 256, L"[SendTo+] __argc=%d\n", __argc);
-    OutputDebugStringW(buf);
-    for (int i = 0; i < __argc; i++) {
-        StringCchPrintfW(buf, 256, L"[SendTo+] __wargv[%d]=%s\n", i, __wargv[i]);
-        OutputDebugStringW(buf);
-    }
-
-    int argc;
-    PWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return 1;
-
     if (!InitializeApplication()) {
         return 1;
     }
@@ -1176,6 +1183,13 @@ int WINAPI wWinMain(
     HMENU popupMenu;
     MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
+        return 1;
+    }
+
+    // better params support
+    int argc;
+    PWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
         return 1;
     }
 

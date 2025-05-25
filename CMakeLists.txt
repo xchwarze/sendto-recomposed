@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 project(sendto_recomposed C)
+add_definitions(-D_WIN32_WINNT=0x0601)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -43,6 +44,7 @@ target_link_libraries(sendto_recomposed PRIVATE
         user32
         gdi32
         uuid
+        uxtheme
 )
 
 # Embed manifest into the generated sendto.exe

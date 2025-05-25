@@ -6,13 +6,13 @@ Licensed under **GPL v3**.
 
 ## Key Ingredients
 
-**Unicode-only** no ANSI/TCHAR branches – predictable builds 
-**Darkmode ready** Native dark-theme support
-**Custom folder icons** honours `desktop.ini` for nicer menu visuals 
-**Icon cache** a single `SHGetImageList` call – speedy painting 
-**Secure recursion** hidden/system items skipped, depth capped to 4 
-**Robust drag-and-drop** real `IDataObject`, always calls `DragLeave` 
-**Clean shutdown** no GDI, COM or image-list leaks 
+* **Unicode-only** no ANSI/TCHAR branches – predictable builds 
+* **Darkmode ready** Native dark-theme support
+* **Custom folder icons** honours `desktop.ini` for nicer menu visuals 
+* **Icon cache** a single `SHGetImageList` call – speedy painting 
+* **Secure recursion** hidden/system items skipped, depth capped to 4 
+* **Robust drag-and-drop** real `IDataObject`, always calls `DragLeave` 
+* **Clean shutdown** no GDI, COM or image-list leaks 
 
 ## Building
 
@@ -39,5 +39,5 @@ See [LICENSE](LICENSE.txt) for full text.
 
 ## Credits
 
-*Original concept & code* © 2009 lifenjoiner
-*Refactor & modernisation* © 2025 DSR! - xchwarze@gmail.com
+* **Original concept & code** © 2009 lifenjoiner
+* **Complete refactor & modernisation** © 2025 DSR! - xchwarze@gmail.com
