@@ -738,7 +738,7 @@ static HRESULT GetShellInterfaceForPIDLs(
             pidlArray[pidlIndex],
             &IID_IShellFolder,
             (void**)&parentFolder,
-            (LPCITEMIDLIST*)&childIDs[pidlIndex]
+            &childIDs[pidlIndex]
         );
         if (FAILED(hr)) {
             SAFE_RELEASE(parentFolder);
@@ -886,7 +886,7 @@ static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
     // Build IDataObject from the array of source file paths
     HRESULT hr = GetShellInterfaceForPaths(
         owner,
-        (PCWSTR*)(argv + 1), // skip argv[0]
+        argv + 1, // skip argv[0]
         argc - 1, // number of files
         &IID_IDataObject,
         (void**)&pDataObj
@@ -959,6 +959,59 @@ static BOOL InitializeApplication(void)
 }
 
 /**
+ * ParseCommandLine - Parse the command-line arguments
+ *
+ * @param argc     The argument count, as returned by CommandLineToArgvW().
+ * @param argv     The argument array, as returned by CommandLineToArgvW().
+ * @param outDir   Receives a malloc’d wide string if “/D <dir>” was supplied.
+ *                 Caller must free with free(). On success, may be NULL.
+ * @return         true if parsing succeeded (or help was shown), false on error.
+ */
+static bool ParseCommandLine(int argc, PWSTR *argv, PWSTR *outDir) {
+    *outDir = NULL;
+
+    for (int i = 1; i < argc; ++i) {
+        PWSTR arg = argv[i];
+
+        // Show usage if requested
+        if (_wcsicmp(arg, L"/?") == 0 || _wcsicmp(arg, L"-?") == 0) {
+            MessageBoxW(
+                NULL,
+                L"Usage:\n"
+                L"  SendTo+ [/D <directory>] [<file1> <file2> ...]\n\n"
+                L"Options:\n"
+                L"  /?           Show this help message\n"
+                L"  /D <dir>     Use <dir> instead of the default SendTo folder\n",
+                L"SendTo+",
+                MB_OK | MB_ICONINFORMATION
+            );
+            return false;
+        }
+
+        // Override SendTo directory
+        if (_wcsicmp(arg, L"/D") == 0) {
+            if (i + 1 < argc) {
+                *outDir = _wcsdup(argv[++i]);
+                if (!*outDir) {
+                    return false;
+                }
+            } else {
+                MessageBoxW(
+                    NULL,
+                    L"Error: /D requires a directory path.\n"
+                    L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]",
+                    L"SendTo+",
+                    MB_OK | MB_ICONERROR
+                );
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
  * ResolveSendToDirectory – build full path to "<exe folder>\\sendto" with \\?\ prefix.
  *
  * @return malloc’d wide string on success (must be freed), or NULL on failure.
@@ -999,7 +1052,7 @@ static BOOL ValidateSendToDirectory(PCWSTR path)
         MessageBoxW(
             NULL,
             L"Cannot find 'sendto' folder next to the executable.",
-            L"SendTo+ Error",
+            L"SendTo+",
             MB_ICONERROR | MB_OK
         );
         return FALSE;
@@ -1033,7 +1086,23 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
     );
 
     if (FAILED(hr)) {
-        OutputDebugStringW(L"[SendTo+] enumerateFolder failed\n");
+        MessageBoxW(
+            NULL,
+            L"Failed to enumerate the SendTo folder.",
+            L"SendTo+",
+            MB_ICONERROR | MB_OK
+        );
+        return FALSE;
+    }
+
+    // If no items were found in the SendTo folder, inform the user
+    if (outItems->count == 0) {
+        MessageBoxW(
+            NULL,
+            L"No items were found in the SendTo folder.",
+            L"SendTo+",
+            MB_ICONINFORMATION | MB_OK
+        );
         return FALSE;
     }
 
@@ -1173,8 +1242,23 @@ int WINAPI wWinMain(
         return 1;
     }
 
+    // better params support
+    int argc;
+    PWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
+        return 1;
+    }
+
     // build and verify sendto directory
-    PWSTR sendToDir = ResolveSendToDirectory();
+    PWSTR sendToDir = NULL;
+    if (!ParseCommandLine(argc, argv, &sendToDir)) {
+        return 1;
+    }
+
+    if (!sendToDir) {
+        sendToDir = ResolveSendToDirectory();
+    }
+
     if (!ValidateSendToDirectory(sendToDir)) {
         return 1;
     }
@@ -1183,13 +1267,6 @@ int WINAPI wWinMain(
     HMENU popupMenu;
     MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
-        return 1;
-    }
-
-    // better params support
-    int argc;
-    PWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) {
         return 1;
     }
 
