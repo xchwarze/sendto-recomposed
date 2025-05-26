@@ -30,7 +30,7 @@ jobs:
       - name: Build with MSVC
         shell: cmd
         run: |
-          cl /O2 /EHsc /MD /DUNICODE /D_UNICODE ^
+          cl /O2 /MD /DUNICODE /D_UNICODE ^
             sendto.c sendto.res ^
             ole32.lib shell32.lib shlwapi.lib comctl32.lib user32.lib gdi32.lib uuid.lib ^
             /link /SUBSYSTEM:WINDOWS
@@ -42,8 +42,18 @@ jobs:
             -manifest sendto.manifest ^
             -outputresource:sendto.exe;#1
 
-      - name: Upload artifact
+      - name: Upload Setup as Artifact
+        if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: sendto-${{ matrix.arch }}
           path: sendto.exe
+
+      - name: Upload Setup as Release download
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: sendto-${{ matrix.arch }}
+          files: sendto.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
