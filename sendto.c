@@ -9,6 +9,7 @@
 #define _WIN32_IE    0x0600 /* Needed for IID_IImageList */
 
 #include <windows.h>
+#include <stdlib.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <commctrl.h>
@@ -36,6 +37,7 @@
 #define SAFE_RELEASE(p)     do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
 #define RETURN_IF_FAILED(h) do { HRESULT _hr = (h); if (FAILED(_hr)) return _hr; } while (0)
 #define BOOL_IF_FAILED(h)   do { if (FAILED(h)) return FALSE; } while(0)
+#define ERR_BOX(msg) MessageBoxW(NULL, msg, L"SendTo+", MB_OK|MB_ICONERROR)
 
 
 /* -------------------------------------------------------------------------- */
@@ -135,7 +137,8 @@ static void ApplyDarkThemeIfNeeded(HWND hwnd)
  * @param      segment2   Second path segment.
  * @return     S_OK on success, E_OUTOFMEMORY if allocation fails, E_FAIL if combine fails.
  */
-static HRESULT CombinePath(PWSTR *outPath, size_t maxChars, PCWSTR segment1, PCWSTR segment2) {
+static HRESULT CombinePath(PWSTR *outPath, size_t maxChars, PCWSTR segment1, PCWSTR segment2)
+{
     *outPath = malloc(maxChars * sizeof **outPath);
     if (!*outPath) {
         return E_OUTOFMEMORY;
@@ -188,12 +191,12 @@ typedef struct {
 static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 {
     if (need <= vec->capacity) {
-        return true;
+        return TRUE;
     }
 
     MenuEntry *tmp = realloc(vec->items, need * sizeof *tmp);
     if (!tmp) {
-        return false;
+        return FALSE;
     }
 
     // Zero the new tail so later clean-up is safe.
@@ -201,7 +204,7 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 
     vec->items    = tmp;
     vec->capacity = need;
-    return true;
+    return TRUE;
 }
 
 /**
@@ -217,14 +220,14 @@ static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
 {
     // If capacity growth fails, we do *not* consume the resources.
     if (!VectorEnsureCapacity(vec, vec->count + 1)) {
-        return false;
+        return FALSE;
     }
 
     // MSVC C compiler lacks compound literals → assign field-by-field.
     vec->items[vec->count].path = path;
     vec->items[vec->count].icon = icon;
     vec->count++;
-    return true;
+    return TRUE;
 }
 
 /**
@@ -959,56 +962,81 @@ static BOOL InitializeApplication(void)
 }
 
 /**
- * ParseCommandLine - Parse the command-line arguments
+ * ParseCommandLine - Parses switches and returns a clean argv[].
  *
- * @param argc     The argument count, as returned by CommandLineToArgvW().
- * @param argv     The argument array, as returned by CommandLineToArgvW().
- * @param outDir   Receives a malloc’d wide string if “/D <dir>” was supplied.
- *                 Caller must free with free(). On success, may be NULL.
- * @return         true if parsing succeeded (or help was shown), false on error.
+ * @param  rawArgc      Argument count from CommandLineToArgvW().
+ * @param  rawArgv      Argument vector from CommandLineToArgvW().
+ * @param  outDir       Receives a malloc’d wide string if “/D <dir>” was supplied.
+ *                      Caller must free() it when done.  May be NULL.
+ * @param  outArgc      Receives the new argument count.
+ * @param  outArgv      Receives a malloc’d PWSTR[] of length outArgc:
+ *                      [0] = rawArgv[0] (exe path)
+ *                      [1..] = only the file arguments.
+ *                      Caller must free() the array (not the strings).
+ * @return              true on success (or after showing help), false on error.
+ *                      If help was shown, returns false so caller can exit.
  */
-static bool ParseCommandLine(int argc, PWSTR *argv, PWSTR *outDir) {
-    *outDir = NULL;
+static bool ParseCommandLine(
+    int     rawArgc,
+    PWSTR  *rawArgv,
+    PWSTR  *outDir,
+    int    *outArgc,
+    PWSTR **outArgv
+) {
+    *outDir  = NULL;
+    *outArgc = 1;                   // always keep exe @ index 0
+    *outArgv = NULL;
 
-    for (int i = 1; i < argc; ++i) {
-        PWSTR arg = argv[i];
+    // allocate worst-case full array
+    PWSTR *temp = malloc(rawArgc * sizeof *temp);
+    if (!temp) {
+        return FALSE;
+    }
 
-        // Show usage if requested
-        if (_wcsicmp(arg, L"/?") == 0 || _wcsicmp(arg, L"-?") == 0) {
-            MessageBoxW(
-                NULL,
-                L"Usage:\n"
-                L"  SendTo+ [/D <directory>] [<file1> <file2> ...]\n\n"
-                L"Options:\n"
-                L"  /?           Show this help message\n"
-                L"  /D <dir>     Use <dir> instead of the default SendTo folder\n",
-                L"SendTo+",
-                MB_OK | MB_ICONINFORMATION
-            );
-            return false;
+    // keep program name
+    temp[0] = rawArgv[0];
+
+    // scan switches & collect files
+    for(int paramIndex = 1; paramIndex < rawArgc; ++paramIndex) {
+        PWSTR param = rawArgv[paramIndex];
+
+        // help?
+        if (_wcsicmp(param, L"/?")==0 || _wcsicmp(param, L"-?")==0) {
+            ERR_BOX(L"Error: /D requires a directory path.\n"
+                    L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
+            return FALSE;
         }
 
-        // Override SendTo directory
-        if (_wcsicmp(arg, L"/D") == 0) {
-            if (i + 1 < argc) {
-                *outDir = _wcsdup(argv[++i]);
+        // override SendTo directory?
+        if (_wcsicmp(param, L"/D")==0) {
+            if (paramIndex + 1 < rawArgc) {
+                *outDir = _wcsdup(rawArgv[++paramIndex]);
                 if (!*outDir) {
-                    return false;
+                    return FALSE;
                 }
             } else {
-                MessageBoxW(
-                    NULL,
-                    L"Error: /D requires a directory path.\n"
-                    L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]",
-                    L"SendTo+",
-                    MB_OK | MB_ICONERROR
-                );
-                return false;
+                ERR_BOX(L"Error: /D requires a directory path.\n"
+                        L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
+                return FALSE;
             }
+
+            continue;
+        }
+
+        // otherwise treat as file
+        temp[(*outArgc)++] = param;
+    }
+
+    // shrink-to-fit (optional)
+    if (*outArgc < rawArgc) {
+        PWSTR *shrunk = realloc(temp, (*outArgc)*sizeof *shrunk);
+        if (shrunk) {
+            temp = shrunk;
         }
     }
 
-    return true;
+    *outArgv = temp;
+    return TRUE;
 }
 
 /**
@@ -1049,12 +1077,7 @@ static BOOL ValidateSendToDirectory(PCWSTR path)
 {
     // check existence and directory attribute
     if (!path || !PathFileExistsW(path) || !PathIsDirectoryW(path)) {
-        MessageBoxW(
-            NULL,
-            L"Cannot find 'sendto' folder next to the executable.",
-            L"SendTo+",
-            MB_ICONERROR | MB_OK
-        );
+        ERR_BOX(L"Cannot find 'sendto' folder next to the executable.");
         return FALSE;
     }
 
@@ -1075,6 +1098,14 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
     *outPopup = CreatePopupMenu();
     *outItems = (MenuVector){ 0 };
 
+    // enable bitmap arrows (chevrons) AND auto-dismiss on click-outside
+    /*MENUINFO menuInfo = { sizeof(menuInfo) };
+    menuInfo.fMask   = MIM_STYLE;
+    menuInfo.dwStyle = MNS_CHECKORBMP     // draw ► for submenus
+                       | MNS_AUTODISMISS  // close when clicking outside
+                       | MNS_NOTIFYBYPOS; // get position notifications
+    SetMenuInfo(*outPopup, &menuInfo);*/
+
     // recursively fill menu and items vector
     UINT initialCmdId = 1;                     // start command IDs at 1
     const HRESULT hr = EnumerateFolder(
@@ -1086,23 +1117,13 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
     );
 
     if (FAILED(hr)) {
-        MessageBoxW(
-            NULL,
-            L"Failed to enumerate the SendTo folder.",
-            L"SendTo+",
-            MB_ICONERROR | MB_OK
-        );
+        ERR_BOX(L"Failed to enumerate the SendTo folder.");
         return FALSE;
     }
 
     // If no items were found in the SendTo folder, inform the user
     if (outItems->count == 0) {
-        MessageBoxW(
-            NULL,
-            L"No items were found in the SendTo folder.",
-            L"SendTo+",
-            MB_ICONINFORMATION | MB_OK
-        );
+        ERR_BOX(L"No items were found in the SendTo folder.");
         return FALSE;
     }
 
@@ -1186,36 +1207,47 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 /**
  * CleanupApplication – free all resources and uninitialize subsystems.
  *
- * @param ownerWnd   hidden owner window to destroy.
- * @param popupMenu  HMENU to destroy.
- * @param sendToDir  path string to free.
- * @param items      MenuVector of menu entries to free.
+ * @param ownerWnd    Hidden owner window to destroy (may be NULL).
+ * @param popupMenu   HMENU to destroy.
+ * @param sendToDir   Directory string returned by ResolveSendToDirectory or /D (may be NULL).
+ *                    Freed with free().
+ * @param items       MenuVector of menu entries to free.
+ * @param rawArgv     Argument vector from CommandLineToArgvW (may be NULL).
+ *                    Freed with LocalFree().
+ * @param cleanArgv   “Clean” argument vector returned by ParseCommandLine (may be NULL).
+ *                    Freed with free().
  */
 static void CleanupApplication(
-    HWND ownerWnd,
-    HMENU popupMenu,
-    PWSTR sendToDir,
-    MenuVector *items
+    HWND   ownerWnd,
+    HMENU  popupMenu,
+    PWSTR  sendToDir,
+    MenuVector *items,
+    PWSTR *rawArgv,
+    PWSTR *cleanArgv
 ) {
-    // free menu item data
+    // destroy menu items and menu itself
     VectorDestroy(items);
     DestroyMenu(popupMenu);
 
-    // free directory path
+    // free the custom SendTo directory string
     free(sendToDir);
 
-    // destroy hidden window
+    // destroy hidden owner window
     if (ownerWnd) {
         DestroyWindow(ownerWnd);
         UnregisterClassW(L"SendToOwnerWindow", GetModuleHandleW(NULL));
     }
 
-    // clean COM interface
+    // release COM desktop folder
     SAFE_RELEASE(desktopShellFolder);
 
-    // release global image list and OLE
+    // release icon list and uninitialize OLE
     CleanupSmallImageList();
     OleUninitialize();
+
+    // free command-line arrays
+    LocalFree(rawArgv);
+    free(cleanArgv);
 }
 
 /**
@@ -1239,20 +1271,22 @@ int WINAPI wWinMain(
     (void)nCmdShow;
 
     if (!InitializeApplication()) {
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // better params support
-    int argc;
-    PWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) {
-        return 1;
+    int rawArgc;
+    PWSTR *rawArgv = CommandLineToArgvW(GetCommandLineW(), &rawArgc);
+    if (!rawArgv) {
+        return EXIT_FAILURE;
     }
 
     // build and verify sendto directory
+    int cleanArgc = 0;
+    PWSTR *cleanArgv = NULL;
     PWSTR sendToDir = NULL;
-    if (!ParseCommandLine(argc, argv, &sendToDir)) {
-        return 1;
+    if (!ParseCommandLine(rawArgc, rawArgv, &sendToDir, &cleanArgc, &cleanArgv)) {
+        return EXIT_FAILURE;
     }
 
     if (!sendToDir) {
@@ -1260,14 +1294,14 @@ int WINAPI wWinMain(
     }
 
     if (!ValidateSendToDirectory(sendToDir)) {
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // build popup menu and items
     HMENU popupMenu;
     MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // create hidden owner window
@@ -1277,20 +1311,26 @@ int WINAPI wWinMain(
     UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
-        if (argc == 1) {
+        if (cleanArgc > 1) {
+            // with args: perform drag-and-drop
+            OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
+            ExecuteDragDrop(owner, item, cleanArgc, cleanArgv);
+        } else {
             // no args: open folder/link
             OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
             ShellExecuteW(NULL, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
-        } else {
-            // with args: perform drag-and-drop
-            OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
-            ExecuteDragDrop(owner, item, argc, argv);
         }
     }
 
     // clean up all resources
-    CleanupApplication(owner, popupMenu, sendToDir, &menuItems);
-    LocalFree(argv);
+    CleanupApplication(
+        owner,
+        popupMenu,
+        sendToDir,
+        &menuItems,
+        rawArgv,
+        cleanArgv
+    );
 
-    return 0;
+    return EXIT_SUCCESS;
 }
