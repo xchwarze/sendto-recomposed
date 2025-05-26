@@ -41,6 +41,45 @@ The output `sendto.exe` is fully 64-bit.
    - Use `sendto.exe /?` to display this help message.
 3. Either click an entry to launch it, or drag files onto the menu and drop them on a target to perform the same action Explorer would.
 
+## Context-Menu Integration
+
+To register **SendTo Recomposed** in the Windows right-click menu for files and folders, create this `.reg`:
+
+```reg
+Windows Registry Editor Version 5.00
+
+; ── Add "Send To+" for all files
+[HKEY_CLASSES_ROOT\*\shell\SendToRecomposed]
+@="Send To+"
+"Icon"="\"%ProgramFiles%\\SendTo Recomposed\\sendto.exe\""
+
+[HKEY_CLASSES_ROOT\*\shell\SendToRecomposed\command]
+@="\"%ProgramFiles%\\SendTo Recomposed\\sendto.exe\" \"%1\""
+
+; ── Add "Send To+" for folders
+[HKEY_CLASSES_ROOT\Directory\shell\SendToRecomposed]
+@="Send To+"
+"Icon"="\"%ProgramFiles%\\SendTo Recomposed\\sendto.exe\""
+
+[HKEY_CLASSES_ROOT\Directory\shell\SendToRecomposed\command]
+@="\"%ProgramFiles%\\SendTo Recomposed\\sendto.exe\" \"%1\""
+````
+
+**Usage**
+
+1. Copy `sendto.exe` into `C:\Program Files\SendTo Recomposed\`.
+2. Save the above as `add-context-menu.reg` and double-click to merge into your registry.
+3. Right-click any file or folder and select **Send To+**.
+
+To unregister, create a `.reg` with these deletions:
+
+```reg
+Windows Registry Editor Version 5.00
+
+[-HKEY_CLASSES_ROOT\*\shell\SendToRecomposed]
+[-HKEY_CLASSES_ROOT\Directory\shell\SendToRecomposed]
+```
+
 ## License
 
 This code is released under the **GNU General Public License v3.0**.
