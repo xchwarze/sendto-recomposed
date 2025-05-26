@@ -44,7 +44,6 @@ target_link_libraries(sendto_recomposed PRIVATE
         user32
         gdi32
         uuid
-        uxtheme
 )
 
 # Embed manifest into the generated sendto.exe

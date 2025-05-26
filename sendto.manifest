@@ -26,6 +26,12 @@
   <!-- Prevent Windows from applying legacy shims/compat modes -->
   <compat:compatibility>
     <compat:application>
+      <!-- Windows 7 -->
+      <compat:supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+      <!-- Windows 8 -->
+      <compat:supportedOS Id="{4f476e0c-dc7f-4dc8-98bc-5b9de0c64c3a}"/>
+      <!-- Windows 8.1 -->
+      <compat:supportedOS Id="{1e5a685c-a13f-4d3f-9cc3-54af3fa34af9}"/>
       <!-- Windows 10 -->
       <compat:supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
       <!-- Windows 11 -->

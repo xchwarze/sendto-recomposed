@@ -19,14 +19,12 @@
 #include <shobjidl.h>
 #include <stdbool.h>
 #include <dwmapi.h>
-#include <uxtheme.h>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "uxtheme.lib")
 
-#define MAX_DEPTH 4
+#define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
 
 
