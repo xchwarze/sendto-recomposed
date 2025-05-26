@@ -1,52 +1,54 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly
-    xmlns="urn:schemas-microsoft-com:asm.v1"
-    xmlns:compat="urn:schemas-microsoft-com:compatibility.v1"
-    xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"
-    manifestVersion="1.0">
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
 
+  <!-- identity -->
   <assemblyIdentity
-      name="SendTo Recomposed"
-      version="1.0.0.0"
-      processorArchitecture="*"
-      type="win32"/>
+    name="SendTo Recomposed"
+    version="1.0.0.0"
+    processorArchitecture="*"
+    type="win32"/>
 
+  <!-- enable common controls v6 (visual styles) -->
   <dependency>
     <dependentAssembly>
       <assemblyIdentity
-          type="win32"
-          name="Microsoft.Windows.Common-Controls"
-          version="6.0.0.0"
-          processorArchitecture="*"
-          publicKeyToken="6595b64144ccf1df"
-          language="*"/>
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"/>
     </dependentAssembly>
   </dependency>
 
-  <!-- Prevent Windows from applying legacy shims/compat modes -->
-  <compat:compatibility>
-    <compat:application>
-      <!-- Windows 7 -->
-      <compat:supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
-      <!-- Windows 8 -->
-      <compat:supportedOS Id="{4f476e0c-dc7f-4dc8-98bc-5b9de0c64c3a}"/>
-      <!-- Windows 8.1 -->
-      <compat:supportedOS Id="{1e5a685c-a13f-4d3f-9cc3-54af3fa34af9}"/>
-      <!-- Windows 10 -->
-      <compat:supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
-      <!-- Windows 11 -->
-      <compat:supportedOS Id="{aeb4a615-f33b-4ebc-af85-dc497e2b815c}"/>
-    </compat:application>
-  </compat:compatibility>
-
   <!-- Opt into per-monitor DPI awareness -->
-  <asmv3:application>
-    <asmv3:windowsSettings>
-      <!-- Win32 legacy DPI awareness -->
-      <dpiAware>true</dpiAware>
-      <!-- New per-monitor V2 awareness on Windows 10+ -->
-      <dpiAwareness>PerMonitorV2</dpiAwareness>
-    </asmv3:windowsSettings>
-  </asmv3:application>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+    </windowsSettings>
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2,PerMonitor</dpiAwareness>
+      </windowsSettings>
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+    <windowsSettings>
+      <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
+    </windowsSettings>
+  </application>
+
+  <!-- opt-out of WinXP shims, declare supported OS versions -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
 
 </assembly>
