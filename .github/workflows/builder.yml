@@ -45,6 +45,13 @@ jobs:
             -manifest sendto.manifest ^
             -outputresource:sendto.exe;#1
 
+      - name: Package distribution zip
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          # Create a zip containing the exe and README
+          Compress-Archive -Path sendto.exe, readme.md -DestinationPath sendto-${{ matrix.arch }}.zip
+
       - name: Upload Setup as Artifact
         if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
@@ -56,7 +63,4 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          name: sendto-${{ matrix.arch }}
-          files: sendto.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: sendto-${{ matrix.arch }}.zip
