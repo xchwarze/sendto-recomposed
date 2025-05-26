@@ -1210,8 +1210,6 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
  * @param sendToDir   Directory string returned by ResolveSendToDirectory or /D (may be NULL).
  *                    Freed with free().
  * @param items       MenuVector of menu entries to free.
- * @param rawArgv     Argument vector from CommandLineToArgvW (may be NULL).
- *                    Freed with LocalFree().
  * @param cleanArgv   “Clean” argument vector returned by ParseCommandLine (may be NULL).
  *                    Freed with free().
  */
@@ -1220,7 +1218,6 @@ static void CleanupApplication(
     HMENU  popupMenu,
     PWSTR  sendToDir,
     MenuVector *items,
-    PWSTR *rawArgv,
     PWSTR *cleanArgv
 ) {
     // destroy menu items and menu itself
@@ -1244,46 +1241,24 @@ static void CleanupApplication(
     OleUninitialize();
 
     // free command-line arrays
-    LocalFree(rawArgv);
     free(cleanArgv);
 }
 
 /**
- * wWinMain – main entry point for SendTo+ clone.
+ * RunSendTo – perform full SendTo+ workflow.
  *
- * @param hInstance     application instance.
- * @param hPrevInstance unused.
- * @param lpCmdLine     unused.
- * @param nCmdShow      unused.
- * @return exit code (0 success, non-zero on error).
+ * @hInstance    application instance.
+ * @argc         argument count.
+ * @argv         argument vector (wide).
+ * @return       exit code (0 success, non-zero on error).
  */
-int WINAPI wWinMain(
-    HINSTANCE hInstance,
-    HINSTANCE hPrevInstance,
-    PWSTR     lpCmdLine,
-    int       nCmdShow
-) {
-    /* suppress unused-parameter warnings */
-    (void)hPrevInstance;
-    (void)lpCmdLine;
-    (void)nCmdShow;
-
-    if (!InitializeApplication()) {
-        return EXIT_FAILURE;
-    }
-
-    // better params support
-    int rawArgc;
-    PWSTR *rawArgv = CommandLineToArgvW(GetCommandLineW(), &rawArgc);
-    if (!rawArgv) {
-        return EXIT_FAILURE;
-    }
-
+static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
+{
     // build and verify sendto directory
     int cleanArgc = 0;
     PWSTR *cleanArgv = NULL;
     PWSTR sendToDir = NULL;
-    if (!ParseCommandLine(rawArgc, rawArgv, &sendToDir, &cleanArgc, &cleanArgv)) {
+    if (!ParseCommandLine(argc, argv, &sendToDir, &cleanArgc, &cleanArgv)) {
         return EXIT_FAILURE;
     }
 
@@ -1326,9 +1301,45 @@ int WINAPI wWinMain(
         popupMenu,
         sendToDir,
         &menuItems,
-        rawArgv,
         cleanArgv
     );
 
     return EXIT_SUCCESS;
+}
+
+/**
+ * wWinMain – main entry point for SendTo+ clone.
+ *
+ * @param hInstance     application instance.
+ * @param hPrevInstance unused.
+ * @param lpCmdLine     unused.
+ * @param nCmdShow      unused.
+ * @return exit code (0 success, non-zero on error).
+ */
+int WINAPI wWinMain(
+    HINSTANCE hInstance,
+    HINSTANCE hPrevInstance,
+    PWSTR     lpCmdLine,
+    int       nCmdShow
+) {
+    /* suppress unused-parameter warnings */
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
+
+    if (!InitializeApplication()) {
+        return EXIT_FAILURE;
+    }
+
+    // better params support
+    int rawArgc;
+    PWSTR *rawArgv = CommandLineToArgvW(GetCommandLineW(), &rawArgc);
+    if (!rawArgv) {
+        return EXIT_FAILURE;
+    }
+
+    const int result = RunSendTo(hInstance, rawArgc, rawArgv);
+    LocalFree(rawArgv);
+
+    return result;
 }

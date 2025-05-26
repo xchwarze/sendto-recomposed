@@ -87,5 +87,5 @@ See [LICENSE](LICENSE.txt) for full text.
 
 ## Credits
 
-* **Original concept & code** © 2009 lifenjoiner
+* **Original concept & code** © 2017 lifenjoiner
 * **Complete refactor & modernisation** © 2025 DSR! - xchwarze@gmail.com
