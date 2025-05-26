@@ -22,9 +22,13 @@ Licensed under **GPL v3**.
 MSVC 
 
 ```cmd
-cl /EHsc /O2 /MD /DUNICODE /D_UNICODE ^
+rc /r sendto.rc
+
+cl /O2 /MD /DUNICODE /D_UNICODE ^
    sendto.c ^
    ole32.lib shell32.lib shlwapi.lib comctl32.lib user32.lib gdi32.lib uuid.lib
+
+mt -nologo -manifest sendto.manifest -outputresource:sendto.exe;#1
 ```
 
 The output `sendto.exe` is fully 64-bit.
@@ -33,7 +37,7 @@ The output `sendto.exe` is fully 64-bit.
 
 1. Copy the executable anywhere on disk.
 2. Run it – a **Send To** style popup appears under the cursor with every item (and sub-folder) from the `sendto` folder located next to the executable.
-   - Use `sendto.exe /D <ruta>` to point to a custom directory.
+   - Use `sendto.exe /D <directory>` to point to a custom directory.
    - Use `sendto.exe /?` to display this help message.
 3. Either click an entry to launch it, or drag files onto the menu and drop them on a target to perform the same action Explorer would.
 

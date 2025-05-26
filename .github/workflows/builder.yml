@@ -27,7 +27,7 @@ jobs:
         run: |
           rc.exe /r sendto.rc
 
-      - name: Build with MSVC
+      - name: Build exe with MSVC
         shell: cmd
         run: |
           cl /O2 /MD /DUNICODE /D_UNICODE ^
@@ -35,7 +35,7 @@ jobs:
             ole32.lib shell32.lib shlwapi.lib comctl32.lib user32.lib gdi32.lib uuid.lib ^
             /link /SUBSYSTEM:WINDOWS
 
-      - name: Embed manifest
+      - name: Embed manifest in exe
         shell: cmd
         run: |
           mt.exe -nologo ^
