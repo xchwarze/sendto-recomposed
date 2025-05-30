@@ -747,8 +747,8 @@ static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
     // Retrieve the IDropTarget for the destination folder/link
     hr = GetShellInterfaceForPaths(
         owner,
-        (PCWSTR*)&entry->path,   // address of the single target path
-        1,                       // one drop target
+        (PCWSTR[]){ entry->path },  // address of the single target path
+        1,                          // one drop target
         &IID_IDropTarget,
         (void**)&pDropTarget
     );
