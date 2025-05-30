@@ -24,7 +24,7 @@
 #pragma comment(lib, "shell32.lib")    // shlobj.h, shobjidl.h – SHGetKnownFolderPath, IShellItem, etc.
 #pragma comment(lib, "shlwapi.lib")    // shlwapi.h – PathIsDirectoryW, StrCmpLogicalW, etc.
 #pragma comment(lib, "dwmapi.lib")     // dwmapi.h – DwmExtendFrameIntoClientArea, etc.
-#pragma comment(lib, "ole32.lib")      // Para COM: CoCreateInstance, etc. (si usás objetos COM)
+#pragma comment(lib, "ole32.lib")      // COM: CoCreateInstance, etc.
 
 #define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
@@ -384,7 +384,7 @@ static HBITMAP IconForPath(PCWSTR filePath)
  * @param  findData  WIN32_FIND_DATA of current entry.
  * @return           TRUE if the entry must be ignored.
  */
-static inline BOOL SkipEntry(const WIN32_FIND_DATAW *findData)
+static BOOL SkipEntry(const WIN32_FIND_DATAW *findData)
 {
     return (findData->dwFileAttributes &
             (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) ||
@@ -516,8 +516,14 @@ static HRESULT EnumerateFolder(
 
     // Begin file enumeration
     WIN32_FIND_DATAW findData;
-    HANDLE hFind = FindFirstFileW(pattern, &findData);
-    free(pattern);
+    HANDLE hFind = FindFirstFileExW(
+        pattern,
+        FindExInfoBasic,
+        &findData,
+        FindExSearchNameMatch,
+        NULL,
+        FIND_FIRST_EX_LARGE_FETCH
+    );
     if (hFind == INVALID_HANDLE_VALUE) {
         return HRESULT_FROM_WIN32(GetLastError());
     }
@@ -755,8 +761,8 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
         return;
     }
 
-    const POINTL pt     = { 0 };
-    DWORD  effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
+    const POINTL pt = { 0 };
+    DWORD effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
 
     // drag into the target
     const HRESULT hrEnter = dropTarget->lpVtbl->DragEnter(
@@ -881,10 +887,10 @@ static BOOL InitializeApplication(void)
  */
 static bool ParseCommandLine(
     int     rawArgc,
-    PWSTR  *rawArgv,
-    PWSTR  *outDir,
-    int    *outArgc,
-    PWSTR **outArgv
+    PWSTR   *rawArgv,
+    PWSTR   *outDir,
+    int     *outArgc,
+    PWSTR   **outArgv
 ) {
     *outDir  = NULL;
     *outArgc = 1;                   // always keep exe @ index 0
@@ -949,8 +955,8 @@ static bool ParseCommandLine(
  */
 static PWSTR ResolveSendToDirectory(void)
 {
+	// get path to our own executable
     WCHAR exeFolder[MAX_PATH];
-    // get path to our own executable
     GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder));
     PathRemoveFileSpecW(exeFolder);
 
@@ -1089,8 +1095,8 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
  */
 static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 {
-    POINT cursor;
     // get cursor position for menu location
+    POINT cursor;
     GetCursorPos(&cursor);
 
     const UINT cmd = TrackPopupMenuEx(
