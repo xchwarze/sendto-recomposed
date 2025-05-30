@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           # Create a zip containing the exe and README
-          Compress-Archive -Path sendto.exe, readme.md -DestinationPath sendto-${{ matrix.arch }}.zip
+          Compress-Archive -Path sendto.exe, readme.md, LICENSE.txt -DestinationPath sendto-${{ matrix.arch }}.zip
 
       - name: Upload Setup as Artifact
         if: github.event_name != 'release'

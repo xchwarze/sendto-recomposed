@@ -41,7 +41,6 @@ static int dibPoolIndex = 0;
 
 #define SAFE_RELEASE(p)     do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
 #define RETURN_IF_FAILED(h) do { HRESULT _hr = (h); if (FAILED(_hr)) return _hr; } while (0)
-#define BOOL_IF_FAILED(h)   do { if (FAILED(h)) return FALSE; } while(0)
 #define ERR_BOX(msg)        MessageBoxW(NULL, msg, L"SendTo+", MB_OK|MB_ICONERROR)
 
 
@@ -958,11 +957,11 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
     VectorEnsureCapacity(outItems, MENU_POOL_SIZE);
 
     // recursively fill menu and items vector
-    UINT initialCmdId = 1;                     // start command IDs at 1
+    UINT initialCmdId = 1; // start command IDs at 1
     const HRESULT hr = EnumerateFolder(
         *outPopup,
         sendToDir,
-        &initialCmdId,                         // pass address of a real variable
+        &initialCmdId,     // pass address of a real variable
         0,
         outItems
     );
