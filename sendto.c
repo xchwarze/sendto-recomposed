@@ -47,7 +47,6 @@
 static HMODULE uxThemeModule = NULL;
 static LPSHELLFOLDER desktopShellFolder = NULL;
 
-
 /**
  * OptInDarkPopupMenus
  *
@@ -128,14 +127,13 @@ static void ApplyDarkThemeIfNeeded(HWND hwnd)
  * combinePath – allocate and combine two path segments.
  *
  * @param[out] outPath    Receives malloc’d wide string (must be freed by caller).
- * @param      maxChars   Maximum wchar count including terminating NUL.
  * @param      segment1   First path segment.
  * @param      segment2   Second path segment.
  * @return     S_OK on success, E_OUTOFMEMORY if allocation fails, E_FAIL if combine fails.
  */
-static HRESULT CombinePath(PWSTR *outPath, size_t maxChars, PCWSTR segment1, PCWSTR segment2)
+static HRESULT CombinePath(PWSTR *outPath, PCWSTR segment1, PCWSTR segment2)
 {
-    *outPath = malloc(maxChars * sizeof **outPath);
+    *outPath = malloc(MAX_LOCAL_PATH * sizeof **outPath);
     if (!*outPath) {
         return E_OUTOFMEMORY;
     }
@@ -401,12 +399,12 @@ static void AddFileItem(
     PCWSTR      fileName,
     HBITMAP     bitmap,
     UINT        commandId,
-    MenuVector *vec,
-    PWSTR       pathCopy
+    MenuVector  *vec,
+    PWSTR       path
 ) {
     // vectorPush may fail; then we must clean up our resources
-    if (!VectorPush(vec, pathCopy, bitmap)) {
-        free(pathCopy);
+    if (!VectorPush(vec, path, bitmap)) {
+        free(path);
         if (bitmap) DeleteObject(bitmap);
         return;
     }
@@ -486,9 +484,9 @@ static void AddDirectoryItem(
 static HRESULT EnumerateFolder(
     HMENU       menu,
     PCWSTR      directory,
-    UINT       *nextCmdId,
+    UINT        *nextCmdId,
     UINT        depth,
-    MenuVector *items
+    MenuVector  *items
 ) {
     // Stop if we've reached maximum allowed depth
     if (depth >= MAX_DEPTH) {
@@ -502,7 +500,7 @@ static HRESULT EnumerateFolder(
 
     // Build the search pattern "directory\\*"
     PWSTR pattern = NULL;
-    HRESULT hr = CombinePath(&pattern, MAX_LOCAL_PATH, directory, L"*");
+    HRESULT hr = CombinePath(&pattern, directory, L"*");
     if (FAILED(hr)) {
         return hr;
     }
@@ -522,7 +520,7 @@ static HRESULT EnumerateFolder(
 
         // Build full child path
         PWSTR childPath = NULL;
-        hr = CombinePath(&childPath, MAX_LOCAL_PATH, directory, findData.cFileName);
+        hr = CombinePath(&childPath, directory, findData.cFileName);
         if (FAILED(hr)) {
             continue;
         }
