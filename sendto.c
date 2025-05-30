@@ -18,17 +18,16 @@
 #include <shellapi.h>
 #include <strsafe.h>
 #include <stdbool.h>
-#include <dwmapi.h>
 
 #pragma comment(lib, "comctl32.lib")   // commctrl.h – InitCommonControlsEx, ImageList_*, etc.
 #pragma comment(lib, "shell32.lib")    // shlobj.h, shobjidl.h – SHGetKnownFolderPath, IShellItem, etc.
 #pragma comment(lib, "shlwapi.lib")    // shlwapi.h – PathIsDirectoryW, StrCmpLogicalW, etc.
-#pragma comment(lib, "dwmapi.lib")     // dwmapi.h – DwmExtendFrameIntoClientArea, etc.
 #pragma comment(lib, "ole32.lib")      // COM: CoCreateInstance, etc.
 
 #define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
 #define DIB_POOL_SIZE 64
+#define MENU_POOL_SIZE 64
 
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
@@ -132,8 +131,9 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
         return TRUE;
     }
 
-    // Amortized growth: double current capacity (or start at 64), but at least 'need'
-    UINT newCap = vec->capacity ? vec->capacity * 2 : 64;
+    // growth in fixed blocks of MENU_POOL_SIZE
+    UINT newCap = vec->capacity ? vec->capacity + MENU_POOL_SIZE
+                                : MENU_POOL_SIZE;
     if (newCap < need) {
         newCap = need;
     }
@@ -953,6 +953,9 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
                        | MNS_AUTODISMISS  // close when clicking outside
                        | MNS_NOTIFYBYPOS; // get position notifications
     SetMenuInfo(*outPopup, &menuInfo);*/
+
+    // pre-reserve capacity in one go to avoid repeated reallocs
+    VectorEnsureCapacity(outItems, MENU_POOL_SIZE);
 
     // recursively fill menu and items vector
     UINT initialCmdId = 1;                     // start command IDs at 1
