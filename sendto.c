@@ -1114,48 +1114,6 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 }
 
 /**
- * CleanupApplication – free all resources and uninitialize subsystems.
- *
- * @param ownerWnd    Hidden owner window to destroy (may be NULL).
- * @param popupMenu   HMENU to destroy.
- * @param sendToDir   Directory string returned by ResolveSendToDirectory or /D (may be NULL).
- *                    Freed with free().
- * @param items       MenuVector of menu entries to free.
- * @param cleanArgv   “Clean” argument vector returned by ParseCommandLine (may be NULL).
- *                    Freed with free().
- */
-static void CleanupApplication(
-    HWND   ownerWnd,
-    HMENU  popupMenu,
-    PWSTR  sendToDir,
-    MenuVector *items,
-    PWSTR *cleanArgv
-) {
-    // destroy menu items and menu itself
-    VectorDestroy(items);
-    DestroyMenu(popupMenu);
-
-    // free the custom SendTo directory string
-    free(sendToDir);
-
-    // destroy hidden owner window
-    if (ownerWnd) {
-        DestroyWindow(ownerWnd);
-        UnregisterClassW(L"SendToOwnerWindow", GetModuleHandleW(NULL));
-    }
-
-    // release COM desktop folder
-    SAFE_RELEASE(desktopShellFolder);
-
-    // release icon list and uninitialize OLE
-    CleanupSmallImageList();
-    OleUninitialize();
-
-    // free command-line arrays
-    free(cleanArgv);
-}
-
-/**
  * RunSendTo – perform full SendTo+ workflow.
  *
  * @hInstance    application instance.
@@ -1206,14 +1164,9 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         }
     }
 
-    // clean up all resources
-    CleanupApplication(
-        owner,
-        popupMenu,
-        sendToDir,
-        &menuItems,
-        cleanArgv
-    );
+    // release COM desktop folder
+    SAFE_RELEASE(desktopShellFolder);
+    OleUninitialize();
 
     return EXIT_SUCCESS;
 }
@@ -1249,8 +1202,5 @@ int WINAPI wWinMain(
         return EXIT_FAILURE;
     }
 
-    const int result = RunSendTo(hInstance, rawArgc, rawArgv);
-    LocalFree(rawArgv);
-
-    return result;
+    return RunSendTo(hInstance, rawArgc, rawArgv);
 }
