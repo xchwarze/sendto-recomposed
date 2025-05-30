@@ -46,7 +46,6 @@
 
 static HMODULE uxThemeModule = NULL;
 static LPSHELLFOLDER desktopShellFolder = NULL;
-static HIMAGELIST smallImageList = NULL;
 
 
 /**
@@ -244,69 +243,8 @@ static void VectorDestroy(MenuVector *vec)
 
 
 /* -------------------------------------------------------------------------- */
-/* System small-icon cache                                                    */
+/* Icons tools                                                                */
 /* -------------------------------------------------------------------------- */
-
-/**
- * ensureSmallImageList – initialize the global small-icon image list.
- *
- * Tries SHGetImageList(SHIL_SMALL). On failure, falls back to
- * SHGetFileInfoW on the Windows directory and AddRefs it.
- */
-static void EnsureSmallImageList(void)
-{
-    if (smallImageList) {
-        return;  // already initialized
-    }
-
-    // Try COM-based retrieval first
-    HRESULT result = SHGetImageList(SHIL_SMALL, &IID_IImageList, (void**)&smallImageList);
-    if (result == S_OK) {
-        return;  // success, we own smallImageList
-    }
-
-    // Fallback: use Windows directory for reliable shell image list
-    WCHAR sysDir[MAX_PATH];
-    if (GetWindowsDirectoryW(sysDir, ARRAYSIZE(sysDir))) {
-        SHFILEINFOW fileInfo = { 0 };
-        HIMAGELIST fallbackList = (HIMAGELIST)SHGetFileInfoW(
-            sysDir,
-            FILE_ATTRIBUTE_DIRECTORY,
-            &fileInfo,
-            sizeof fileInfo,
-            SHGFI_SYSICONINDEX | SHGFI_SMALLICON
-        );
-        if (fallbackList) {
-            smallImageList = fallbackList;  // only assign if valid
-        }
-    }
-
-    // AddRef so our copy stays valid after shell unloads
-    if (smallImageList) {
-        // image list is owned by shell. AddRef to keep it alive
-        IUnknown *pUnk = (IUnknown*)smallImageList;
-        if (pUnk) {
-            pUnk->lpVtbl->AddRef(pUnk);
-        }
-    }
-}
-
-/**
- * cleanupSmallImageList – release the global small-icon image list.
- *
- * @return        void; does nothing if the list is not initialized.
- */
-static void CleanupSmallImageList(void)
-{
-    if (!smallImageList) {
-        return;
-    }
-
-    // Detach global reference before releasing
-    IUnknown *pUnk = (IUnknown*)smallImageList;
-    smallImageList = NULL;
-    pUnk->lpVtbl->Release(pUnk);
-}
 
 /**
  * createDIBSection32 – allocate a top-down 32-bit DIB of given size.
@@ -328,42 +266,6 @@ static HBITMAP CreateDIBSection32(int width, int height)
     bmi.bmiHeader.biCompression = BI_RGB;
 
     return CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, NULL, NULL, 0);
-}
-
-/**
- * makeIconBitmap – create a 32-bit ARGB bitmap from the shared small icon list.
- *
- * @param iconIndex  Zero-based index into the small icon list.
- * @return           HBITMAP (32-bit ARGB) owned by caller, or NULL on failure.
- */
-static HBITMAP MakeIconBitmap(int iconIndex)
-{
-    EnsureSmallImageList();
-    if (!smallImageList) {
-        return NULL;  // no image list available
-    }
-
-    int iconWidth, iconHeight;
-    if (!ImageList_GetIconSize(smallImageList, &iconWidth, &iconHeight)) {
-        return NULL;  // failed to retrieve dimensions
-    }
-
-    // Allocate a matching DIB
-    HBITMAP bitmap = CreateDIBSection32(iconWidth, iconHeight);
-    if (!bitmap) {
-        return NULL;
-    }
-
-    // Draw the icon onto the DIB using the same DC
-    HDC drawDC = CreateCompatibleDC(NULL);
-    if (drawDC) {
-        HGDIOBJ oldObj = SelectObject(drawDC, bitmap);
-        ImageList_Draw(smallImageList, iconIndex, drawDC, 0, 0, ILD_TRANSPARENT);
-        SelectObject(drawDC, oldObj);
-        DeleteDC(drawDC);
-    }
-
-    return bitmap;
 }
 
 /**
@@ -430,12 +332,10 @@ static HBITMAP IconForPath(PCWSTR filePath)
     // Directories: shell icon
     if (PathIsDirectoryW(filePath)) {
         flags = SHGFI_ICON | SHGFI_SMALLICON;
-        if (SHGetFileInfoW(filePath, 0, &info, sizeof info, SHGFI_ICON | SHGFI_SMALLICON)) {
+        if (SHGetFileInfoW(filePath, 0, &info, sizeof(info), flags)) {
             HBITMAP result = DibFromIcon(info.hIcon);
             DestroyIcon(info.hIcon);
-            if (result) {
-                return result;
-            }
+            return result;
         }
 
         // default for folders
@@ -449,21 +349,20 @@ static HBITMAP IconForPath(PCWSTR filePath)
         flags |= SHGFI_LINKOVERLAY;
     }
     
-    // primary file icon (with overlay)
-    if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof info, flags)) {
+    if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         DestroyIcon(info.hIcon);
-        if (result) {
-            return result;
-        }
+        return result;
     }
 
-    // fallback to system image list by index
+    // fallback: system image list (includes non-existent/virtual items)
     flags = SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
-    if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof info, flags)) {
-        return MakeIconBitmap(info.iIcon);
+    if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
+        HBITMAP result = DibFromIcon(info.hIcon);
+        DestroyIcon(info.hIcon);
+        return result;
     }
-    
+
     return NULL;
 }
 
@@ -748,7 +647,7 @@ static HRESULT GetShellInterfaceForPIDLs(
 
         // Release intermediate shell folder except for the last one
         if (pidlIndex < pidlCount - 1) {
-            parentFolder->lpVtbl->Release(parentFolder);
+            SAFE_RELEASE(parentFolder);
         }
     }
 
@@ -764,7 +663,7 @@ static HRESULT GetShellInterfaceForPIDLs(
     );
 
     // Clean up
-    parentFolder->lpVtbl->Release(parentFolder);
+    SAFE_RELEASE(parentFolder);
     free(childIDs);
 
     return hr;
