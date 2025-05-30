@@ -90,29 +90,6 @@ static void OptInDarkPopupMenus(void)
     }
 }
 
-/**
- * combinePath – allocate and combine two path segments.
- *
- * @param[out] outPath    Receives malloc’d wide string (must be freed by caller).
- * @param      segment1   First path segment.
- * @param      segment2   Second path segment.
- * @return     S_OK on success, E_OUTOFMEMORY if allocation fails, E_FAIL if combine fails.
- */
-static HRESULT CombinePath(PWSTR *outPath, PCWSTR segment1, PCWSTR segment2)
-{
-    *outPath = malloc(MAX_LOCAL_PATH * sizeof **outPath);
-    if (!*outPath) {
-        return E_OUTOFMEMORY;
-    }
-
-    if (!PathCombineW(*outPath, segment1, segment2)) {
-        free(*outPath);
-        return E_FAIL;
-    }
-
-    return S_OK;
-}
-
 
 /* -------------------------------------------------------------------------- */
 /* Dynamic array for menu items                                               */
@@ -125,7 +102,7 @@ static HRESULT CombinePath(PWSTR *outPath, PCWSTR segment1, PCWSTR segment2)
  * @member icon  32-bit ARGB bitmap for the menu (may be NULL).
  */
 typedef struct {
-    PWSTR   path;
+    WCHAR   path[MAX_LOCAL_PATH];
     HBITMAP icon;
 } MenuEntry;
 
@@ -185,7 +162,7 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
  * @return      true on success, false on OOM — if false the caller still
  *              owns @path/@icon and must free/delete them.
  */
-static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
+static bool VectorPush(MenuVector *vec, PCWSTR path, HBITMAP icon)
 {
     // If capacity growth fails, we do *not* consume the resources.
     if (!VectorEnsureCapacity(vec, vec->count + 1)) {
@@ -193,7 +170,7 @@ static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
     }
 
     // MSVC C compiler lacks compound literals → assign field-by-field.
-    vec->items[vec->count].path = path;
+    StringCchCopyW(vec->items[vec->count].path, MAX_LOCAL_PATH, path);
     vec->items[vec->count].icon = icon;
     vec->count++;
 
@@ -208,8 +185,9 @@ static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
 static void VectorDestroy(MenuVector *vec)
 {
     for (UINT i = 0; i < vec->count; ++i) {
-        free(vec->items[i].path);
-        if (vec->items[i].icon) DeleteObject(vec->items[i].icon);
+        if (vec->items[i].icon) {
+            DeleteObject(vec->items[i].icon);
+        }
     }
     free(vec->items);
     ZeroMemory(vec, sizeof *vec);
@@ -364,7 +342,7 @@ static BOOL SkipEntry(const WIN32_FIND_DATAW *findData)
  * @param bitmap     HBITMAP icon to display, or NULL for no icon.
  * @param commandId  Unique command identifier for the menu entry.
  * @param vec        Pointer to a MenuVector to store the path and bitmap.
- * @param pathCopy   Heap-allocated copy of the file path; freed on failure.
+ * @param path       File path (stack buffer); copied internally by VectorPush.
  * @return           void; on push failure, frees pathCopy and bitmap if set.
  */
 static void AddFileItem(
@@ -373,11 +351,10 @@ static void AddFileItem(
     HBITMAP     bitmap,
     UINT        commandId,
     MenuVector  *vec,
-    PWSTR       path
+    PCWSTR      path
 ) {
     // vectorPush may fail; then we must clean up our resources
     if (!VectorPush(vec, path, bitmap)) {
-        free(path);
         if (bitmap) DeleteObject(bitmap);
         return;
     }
@@ -472,10 +449,9 @@ static HRESULT EnumerateFolder(
     }
 
     // Build the search pattern "directory\\*"
-    PWSTR pattern = NULL;
-    HRESULT hr = CombinePath(&pattern, directory, L"*");
-    if (FAILED(hr)) {
-        return hr;
+    WCHAR pattern[MAX_LOCAL_PATH];
+    if (!PathCombineW(pattern, directory, L"*")) {
+        return E_FAIL;
     }
 
     // Begin file enumeration
@@ -494,13 +470,13 @@ static HRESULT EnumerateFolder(
 
     do {
         // Skip "." , "..", hidden, or system entries
-        if (SkipEntry(&findData))
+        if (SkipEntry(&findData)) {
             continue;
+        }
 
         // Build full child path
-        PWSTR childPath = NULL;
-        hr = CombinePath(&childPath, directory, findData.cFileName);
-        if (FAILED(hr)) {
+        WCHAR childPath[MAX_LOCAL_PATH];
+        if (!PathCombineW(childPath, directory, findData.cFileName)) {
             continue;
         }
 
@@ -511,8 +487,6 @@ static HRESULT EnumerateFolder(
             // For subdirectories, create a new submenu
             HMENU subMenu = CreatePopupMenu();
             if (!subMenu) {
-                // avoid inserting into NULL menu; clean up and skip
-                free(childPath);
                 if (bmp) {
                     DeleteObject(bmp);
                 }
