@@ -130,9 +130,8 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
         return TRUE;
     }
 
-    // growth in fixed blocks of MENU_POOL_SIZE
-    UINT newCap = vec->capacity ? vec->capacity + MENU_POOL_SIZE
-                                : MENU_POOL_SIZE;
+    // Amortized growth: double current capacity (or start at 64), but at least 'need'
+    UINT newCap = vec->capacity ? vec->capacity * 2 : MENU_POOL_SIZE;
     if (newCap < need) {
         newCap = need;
     }
@@ -266,29 +265,36 @@ static HBITMAP DibFromIcon(HICON iconHandle)
 }
 
 /**
- * iconForPath – return a 32-bit ARGB bitmap for the given path.
+ * IconForDirectory – retrieve shell small icon for a directory.
  *
- * For directories: returns shell small icon.
- * For files: returns file icon (adds .lnk overlay if necessary).
- * Falls back to system list if SHGetFileInfo fails.
+ * @param directoryPath  Null-terminated wide string path to a directory.
+ * @return               32-bit ARGB HBITMAP, or NULL on failure.
  */
-static HBITMAP IconForPath(PCWSTR filePath)
+static HBITMAP IconForDirectory(PCWSTR directoryPath)
+{
+    SHFILEINFOW info;
+
+    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
+    if (SHGetFileInfoW(directoryPath, 0, &info, sizeof(info), flags)) {
+        HBITMAP result = DibFromIcon(info.hIcon);
+        DestroyIcon(info.hIcon);
+        return result;
+    }
+
+    // default for folders
+    return NULL;
+}
+
+/**
+ * IconForItem – retrieve shell small icon for a file, with .lnk overlay if needed.
+ *
+ * @param filePath  Null-terminated wide string path to a file.
+ * @return          32-bit ARGB HBITMAP, or NULL on failure.
+ */
+static HBITMAP IconForItem(PCWSTR filePath)
 {
     SHFILEINFOW info;
     UINT flags;
-
-    // Directories: shell icon
-    if (PathIsDirectoryW(filePath)) {
-        flags = SHGFI_ICON | SHGFI_SMALLICON;
-        if (SHGetFileInfoW(filePath, 0, &info, sizeof(info), flags)) {
-            HBITMAP result = DibFromIcon(info.hIcon);
-            DestroyIcon(info.hIcon);
-            return result;
-        }
-
-        // default for folders
-        return NULL;
-    }
 
     // Files: get icon, possibly with link overlay
     flags = SHGFI_ICON | SHGFI_SMALLICON;
@@ -296,7 +302,7 @@ static HBITMAP IconForPath(PCWSTR filePath)
     if (extension && _wcsicmp(extension, L".lnk") == 0) {
         flags |= SHGFI_LINKOVERLAY;
     }
-    
+
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         DestroyIcon(info.hIcon);
@@ -442,11 +448,6 @@ static HRESULT EnumerateFolder(
         return S_OK;
     }
 
-    // Skip if the path isn't a directory
-    if (!PathIsDirectoryW(directory)) {
-        return S_OK;
-    }
-
     // Build the search pattern "directory\\*"
     WCHAR pattern[MAX_LOCAL_PATH];
     if (!PathCombineW(pattern, directory, L"*")) {
@@ -479,32 +480,32 @@ static HRESULT EnumerateFolder(
             continue;
         }
 
-        // Retrieve icon bitmap for this entry
-        HBITMAP bmp = IconForPath(childPath);
-
         if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // For subdirectories, create a new submenu
             HMENU subMenu = CreatePopupMenu();
             if (!subMenu) {
-                if (bmp) {
-                    DeleteObject(bmp);
-                }
                 continue;
             }
 
+            // Retrieve icon bitmap for this entry
+            HBITMAP icon = IconForDirectory(childPath);
+
             // Insert directory item with icon and context-help ID
             AddDirectoryItem(menu, findData.cFileName,
-                             bmp, subMenu, *nextCmdId);
+                             icon, subMenu, *nextCmdId);
             
             // Store in vector for later invocation
-            VectorPush(items, childPath, bmp);
+            VectorPush(items, childPath, icon);
             (*nextCmdId)++;
             
             // Recurse into the subdirectory
             EnumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
         } else {
+            // Retrieve icon bitmap for this entry
+            HBITMAP icon = IconForItem(childPath);
+
             // For files, insert a regular file item
-            AddFileItem(menu, findData.cFileName, bmp, (*nextCmdId)++,
+            AddFileItem(menu, findData.cFileName, icon, (*nextCmdId)++,
                         items, childPath);
         }
 
