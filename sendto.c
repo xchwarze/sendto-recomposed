@@ -28,6 +28,13 @@
 
 #define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
+#define DIB_POOL_SIZE 64
+
+static HMODULE uxThemeModule = NULL;
+static LPSHELLFOLDER desktopShellFolder = NULL;
+static HDC hdcIconCache = NULL;
+static HBITMAP dibPool[DIB_POOL_SIZE];
+static int dibPoolIndex = 0;
 
 
 /* -------------------------------------------------------------------------- */
@@ -43,9 +50,6 @@
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
-
-static HMODULE uxThemeModule = NULL;
-static LPSHELLFOLDER desktopShellFolder = NULL;
 
 /**
  * OptInDarkPopupMenus
@@ -304,16 +308,13 @@ static HBITMAP DibFromIcon(HICON iconHandle)
     }
 
     // allocate DIB section; pointer to its bits is discarded here
-    HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
+    HBITMAP dibBitmap = dibPool[dibPoolIndex];
+    dibPoolIndex = (dibPoolIndex + 1) % DIB_POOL_SIZE;
     if (dibBitmap) {
-        // create temporary DC
-        HDC drawDC = CreateCompatibleDC(NULL);
-        if (drawDC) {
-            HGDIOBJ oldObj = SelectObject(drawDC, dibBitmap);
-            DrawIconEx(drawDC, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
-            SelectObject(drawDC, oldObj);
-            DeleteDC(drawDC);
-        }
+        // Reuse the global HDC for drawing
+        HGDIOBJ oldObj = SelectObject(hdcIconCache, dibBitmap);
+        DrawIconEx(hdcIconCache, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
+        SelectObject(hdcIconCache, oldObj);
     }
 
     // Cleanup original icon and bitmaps
@@ -859,7 +860,13 @@ static BOOL InitializeApplication(void)
         return FALSE;
     }
 
-    // add dark mode support
+    // cache setup
+    hdcIconCache = CreateCompatibleDC(NULL);
+    for (int i = 0; i < DIB_POOL_SIZE; ++i) {
+        dibPool[i] = CreateDIBSection32(24, 24);
+    }
+
+    // add theme support
     uxThemeModule = LoadLibraryW(L"uxtheme.dll");
     if (!uxThemeModule) {
         return FALSE;
