@@ -30,7 +30,6 @@
 #define MAX_LOCAL_PATH 32767
 #define DIB_POOL_SIZE 64
 
-static HMODULE uxThemeModule = NULL;
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
 static HBITMAP dibPool[DIB_POOL_SIZE];
@@ -68,6 +67,11 @@ static void OptInDarkPopupMenus(void)
         AppMode_Max
     } PreferredAppMode;
 
+    HMODULE uxThemeModule = LoadLibraryW(L"uxtheme.dll");
+    if (!uxThemeModule) {
+        return;
+    }
+
     // Ordinals are stable since 1809
     typedef PreferredAppMode (WINAPI *SetPreferredAppMode_t)(PreferredAppMode);
     typedef BOOL (WINAPI *FlushMenuThemes_t)(void);
@@ -84,47 +88,6 @@ static void OptInDarkPopupMenus(void)
     if (pFlushMenuThemes) {
         pFlushMenuThemes();
     }
-}
-
-/**
- * AppUsesDarkTheme
- *
- * Return TRUE when the user has “Dark” selected for *Apps* in Settings.
- * Relies on uxtheme!ShouldAppsUseDarkMode (exported by ordinal 132).
- */
-static BOOL AppUsesDarkTheme(void)
-{
-    typedef BOOL (WINAPI *ShouldAppsUseDarkMode_t)(void);
-
-    // Ordinals are stable since 1809
-    ShouldAppsUseDarkMode_t ShouldAppsUseDarkMode =
-        (ShouldAppsUseDarkMode_t)GetProcAddress(uxThemeModule, MAKEINTRESOURCEA(132));
-
-    return ShouldAppsUseDarkMode && ShouldAppsUseDarkMode();
-}
-
-/**
- * ApplyDarkThemeIfNeeded
- *
- * Toggle DWMWA_USE_IMMERSIVE_DARK_MODE so the window caption, context menus
- * and drop-shadows match the current per-app theme.
- *
- * @param hwnd  Window handle (can be your hidden owner window).
- */
-static void ApplyDarkThemeIfNeeded(HWND hwnd)
-{
-    if (!hwnd) {
-        return;
-    }
-
-    const BOOL enableDark = AppUsesDarkTheme();
-
-    // Ignored by builds < 18362 — safe no-op there.
-    (void)DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_USE_IMMERSIVE_DARK_MODE,
-        &enableDark,
-        sizeof(enableDark));
 }
 
 /**
@@ -867,11 +830,6 @@ static BOOL InitializeApplication(void)
     }
 
     // add theme support
-    uxThemeModule = LoadLibraryW(L"uxtheme.dll");
-    if (!uxThemeModule) {
-        return FALSE;
-    }
-
     OptInDarkPopupMenus();
 
     return TRUE;
@@ -1079,10 +1037,6 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
         NULL
     );
     if (hwnd) {
-        // theme support setup
-        //SetWindowTheme(hwnd, L"ExplorerMenu", NULL);
-        ApplyDarkThemeIfNeeded(hwnd);
-
         // menu logic
         ShowWindow(hwnd, SW_HIDE);
         SetForegroundWindow(hwnd);
@@ -1193,7 +1147,7 @@ int WINAPI wWinMain(
     PWSTR     lpCmdLine,
     int       nCmdShow
 ) {
-    /* suppress unused-parameter warnings */
+    // suppress unused-parameter warnings
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
@@ -1209,5 +1163,6 @@ int WINAPI wWinMain(
         return EXIT_FAILURE;
     }
 
+    // se fini
     return RunSendTo(hInstance, rawArgc, rawArgv);
 }
