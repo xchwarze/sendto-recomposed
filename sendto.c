@@ -4,9 +4,10 @@
  * based on https://github.com/lifenjoiner/sendto-plus
  */
 
+#include <sdkddkver.h>
 #define WIN32_LEAN_AND_MEAN
-#define _WIN32_WINNT 0x0601 /* Windows 7 */
-#define _WIN32_IE    0x0600 /* Needed for IID_IImageList */
+#define _WIN32_WINNT _WIN32_WINNT_WIN7
+#define _WIN32_IE _WIN32_IE_IE80
 
 #include <windows.h>
 #include <stdlib.h>
@@ -16,13 +17,14 @@
 #include <commoncontrols.h> /* for IID_IImageList */
 #include <shellapi.h>
 #include <strsafe.h>
-#include <shobjidl.h>
 #include <stdbool.h>
 #include <dwmapi.h>
 
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "comctl32.lib")   // commctrl.h – InitCommonControlsEx, ImageList_*, etc.
+#pragma comment(lib, "shell32.lib")    // shlobj.h, shobjidl.h – SHGetKnownFolderPath, IShellItem, etc.
+#pragma comment(lib, "shlwapi.lib")    // shlwapi.h – PathIsDirectoryW, StrCmpLogicalW, etc.
+#pragma comment(lib, "dwmapi.lib")     // dwmapi.h – DwmExtendFrameIntoClientArea, etc.
+#pragma comment(lib, "ole32.lib")      // Para COM: CoCreateInstance, etc. (si usás objetos COM)
 
 #define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
@@ -35,7 +37,7 @@
 #define SAFE_RELEASE(p)     do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
 #define RETURN_IF_FAILED(h) do { HRESULT _hr = (h); if (FAILED(_hr)) return _hr; } while (0)
 #define BOOL_IF_FAILED(h)   do { if (FAILED(h)) return FALSE; } while(0)
-#define ERR_BOX(msg) MessageBoxW(NULL, msg, L"SendTo+", MB_OK|MB_ICONERROR)
+#define ERR_BOX(msg)        MessageBoxW(NULL, msg, L"SendTo+", MB_OK|MB_ICONERROR)
 
 
 /* -------------------------------------------------------------------------- */
@@ -46,9 +48,6 @@ static HMODULE uxThemeModule = NULL;
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HIMAGELIST smallImageList = NULL;
 
-#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
-#define DWMWA_USE_IMMERSIVE_DARK_MODE 20  // Missing in older SDKs
-#endif
 
 /**
  * OptInDarkPopupMenus
