@@ -13,8 +13,8 @@ IDI_APP_ICON ICON "sendto.ico"
 // Version info
 
 1 VERSIONINFO
- FILEVERSION    1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION    1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEFLAGSMASK  0x3fL
  FILEOS         VOS__WINDOWS32
  FILETYPE       VFT_APP
@@ -26,11 +26,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "xchwarze\0"
             VALUE "FileDescription",  "SendTo Recomposed\0"
-            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "FileVersion",      "1.1.0.0\0"
             VALUE "InternalName",     "sendto.exe\0"
             VALUE "OriginalFilename", "sendto.exe\0"
             VALUE "ProductName",      "SendTo Recomposed\0"
-            VALUE "ProductVersion",   "1.0.0.0\0"
+            VALUE "ProductVersion",   "1.1.0.0\0"
             VALUE "LegalCopyright",   "© 2025 xchwarze. All rights reserved.\0"
         END
     END
