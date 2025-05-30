@@ -188,16 +188,24 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
         return TRUE;
     }
 
-    MenuEntry *tmp = realloc(vec->items, need * sizeof *tmp);
+    // Amortized growth: double current capacity (or start at 64), but at least 'need'
+    UINT newCap = vec->capacity ? vec->capacity * 2 : 64;
+    if (newCap < need) {
+        newCap = need;
+    }
+
+    MenuEntry *tmp = realloc(vec->items, newCap * sizeof *tmp);
     if (!tmp) {
         return FALSE;
     }
 
     // Zero the new tail so later clean-up is safe.
-    ZeroMemory(tmp + vec->capacity, (need - vec->capacity) * sizeof *tmp);
+    ZeroMemory(tmp + vec->capacity,
+               (newCap - vec->capacity) * sizeof *tmp);
 
     vec->items    = tmp;
-    vec->capacity = need;
+    vec->capacity = newCap;
+
     return TRUE;
 }
 
@@ -221,6 +229,7 @@ static bool VectorPush(MenuVector *vec, PWSTR path, HBITMAP icon)
     vec->items[vec->count].path = path;
     vec->items[vec->count].icon = icon;
     vec->count++;
+
     return TRUE;
 }
 
