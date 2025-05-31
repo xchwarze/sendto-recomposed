@@ -120,7 +120,7 @@ typedef struct {
 } MenuVector;
 
 /**
- * vectorEnsureCapacity – make room for at least @need elements.
+ * VectorEnsureCapacity – make room for at least @need elements.
  *
  * @param vec   Target vector.
  * @param need  Desired minimum capacity.
@@ -154,7 +154,7 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 }
 
 /**
- * vectorPush – append a new entry (takes ownership of resources).
+ * VectorPush – append a new entry (takes ownership of resources).
  *
  * @param vec   Vector to modify.
  * @param path  Heap path (caller must not reuse).
@@ -178,7 +178,7 @@ static bool VectorPush(MenuVector *vec, PCWSTR path, HBITMAP icon)
 }
 
 /**
- * vectorDestroy – free all stored paths/bitmaps and reset vector to zero.
+ * VectorDestroy – free all stored paths/bitmaps and reset vector to zero.
  *
  * @param vec  Vector to wipe.
  */
@@ -199,7 +199,7 @@ static void VectorDestroy(MenuVector *vec)
 /* -------------------------------------------------------------------------- */
 
 /**
- * createDIBSection32 – allocate a top-down 32-bit DIB of given size.
+ * CreateDIBSection32 – allocate a top-down 32-bit DIB of given size.
  *
  * @param width   Desired bitmap width in pixels.
  * @param height  Desired bitmap height in pixels.
@@ -221,7 +221,7 @@ static HBITMAP CreateDIBSection32(int width, int height)
 }
 
 /**
- * dibFromIcon – convert an HICON to a 32-bit ARGB HBITMAP.
+ * DibFromIcon – convert an HICON to a 32-bit ARGB HBITMAP.
  *
  * @param iconHandle  Source HICON (ownership transferred; this function destroys it).
  * @return            HBITMAP or NULL on failure.
@@ -329,7 +329,7 @@ static HBITMAP IconForItem(PCWSTR filePath)
 /* -------------------------------------------------------------------------- */
 
 /**
- * skipEntry – filter out "." / ".." and hidden or system files.
+ * SkipEntry – filter out "." / ".." and hidden or system files.
  *
  * @param  findData  WIN32_FIND_DATA of current entry.
  * @return           TRUE if the entry must be ignored.
@@ -430,7 +430,7 @@ static void AddDirectoryItem(
 }
 
 /**
- * enumerateFolder – recursively enumerate a directory and add entries to a menu.
+ * EnumerateFolder – recursively enumerate a directory and add entries to a menu.
  *
  * @param menu        HMENU to which items and submenus will be added.
  * @param directory   Wide‐string path of the folder to enumerate.
@@ -496,11 +496,11 @@ static HRESULT EnumerateFolder(
             // Insert directory item with icon and context-help ID
             AddDirectoryItem(menu, findData.cFileName,
                              icon, subMenu, *nextCmdId);
-            
+
             // Store in vector for later invocation
             VectorPush(items, childPath, icon);
             (*nextCmdId)++;
-            
+
             // Recurse into the subdirectory
             EnumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
         } else {
@@ -526,9 +526,7 @@ static HRESULT EnumerateFolder(
 /* -------------------------------------------------------------------------- */
 
 /**
- * PathToPIDL
- *
- * Convert a filesystem path into a COM PIDL (item identifier list).
+ * PathToPIDL - Convert a filesystem path into a COM PIDL (item identifier list).
  *
  * @param hwndOwner   HWND used as the parsing context (may be NULL).
  * @param pszPath     Null-terminated wide string path to file or folder.
@@ -556,10 +554,7 @@ static LPITEMIDLIST PathToPIDL(HWND hwndOwner, PCWSTR pszPath)
 }
 
 /**
- * GetShellInterfaceForPIDLs
- *
- * Given an array of absolute PIDLs, bind to the requested COM interface
- * (IDataObject, IDropTarget, etc.) on their parent shell folder.
+ * GetShellInterfaceForPIDLs - Given an array of absolute PIDLs, bind to the requested COM
  *
  * @param hwndOwner     HWND used for binding context (may be NULL).
  * @param pidlArray     Array of absolute PIDLs.
@@ -624,10 +619,7 @@ static HRESULT GetShellInterfaceForPIDLs(
 }
 
 /**
- * GetShellInterfaceForPaths
- *
- * Convert an array of file or folder paths into PIDLs and
- * retrieve the requested COM interface from those PIDLs.
+ * GetShellInterfaceForPaths -  Convert an array of file or folder paths into PIDLs
  *
  * @param hwndOwner     Window handle used as context for PIDL parsing.
  * @param paths         Array of wide-string file/folder paths.
@@ -688,9 +680,7 @@ static HRESULT GetShellInterfaceForPaths(
 }
 
 /**
- * ExecuteDropOperation
- *
- * Perform COM drag-enter, drop, and leave on the given drop target.
+ * ExecuteDropOperation - Perform COM drag-enter, drop, and leave on the given drop target.
  *
  * @param dataObj    IDataObject with drag data.
  * @param dropTarget IDropTarget for the drop target.
@@ -721,10 +711,7 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
 }
 
 /**
- * ExecuteDragDrop
- *
- * Perform a COM drag-and-drop of the files passed in argv[1…argc-1]
- * onto the destination specified by entry->path.
+ * ExecuteDragDrop - Perform a COM drag-and-drop of the files passed in argv[1…argc-1]
  *
  * @param owner   HWND of the hidden owner window for COM calls.
  * @param entry   Pointer to the MenuEntry containing the target .path.
@@ -1128,7 +1115,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 }
 
 /**
- * wWinMain – main entry point for SendTo+ clone.
+ * wWinMain – main entry point for SendTo+.
  *
  * @param hInstance     application instance.
  * @param hPrevInstance unused.
