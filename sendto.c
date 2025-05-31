@@ -279,9 +279,10 @@ static HBITMAP IconForDirectory(PCWSTR directoryPath)
     UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
     if (SHGetFileInfoW(directoryPath, 0, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
-        if (info.hIcon)
+        if (result) {
             DestroyIcon(info.hIcon);
-        return result;
+            return result;
+        }
     }
 
     // default for folders
@@ -308,16 +309,20 @@ static HBITMAP IconForItem(PCWSTR filePath)
 
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
-        DestroyIcon(info.hIcon);
-        return result;
+        if (result) {
+            DestroyIcon(info.hIcon);
+            return result;
+        }
     }
 
     // fallback: system image list (includes non-existent/virtual items)
     flags = SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
-        DestroyIcon(info.hIcon);
-        return result;
+        if (result) {
+            DestroyIcon(info.hIcon);
+            return result;
+        }
     }
 
     return NULL;
@@ -906,7 +911,7 @@ static PWSTR ResolveSendToDirectory(void)
 {
 	// get path to our own executable
     WCHAR exeFolder[MAX_PATH];
-    if (!GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder))){
+    if (!GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder))) {
         OutputDebugStringW(L"[SendTo+] GetModuleFileNameW failed\n");
         return NULL;
     }
@@ -1011,7 +1016,7 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
         .lpszClassName = CLASS_NAME
     };
     if (!RegisterClassExW(&wc)) {
-        OutputDebugStringW(L"[SendTo+] RegisterClassExW failed\n");
+        ERR_BOX(L"Call to RegisterClassExW() failed");
         return NULL;
     }
 
@@ -1027,13 +1032,14 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
         hInstance,
         NULL
     );
-    if (hwnd) {
-        // menu logic
-        ShowWindow(hwnd, SW_HIDE);
-        SetForegroundWindow(hwnd);
-    } else {
-        OutputDebugStringW(L"[SendTo+] CreateWindowExW failed\n");
+    if (!hwnd) {
+        ERR_BOX(L"Call to CreateWindowExW() failed");
+        return NULL;
     }
+
+    // menu logic
+    ShowWindow(hwnd, SW_HIDE);
+    SetForegroundWindow(hwnd);
 
     return hwnd;
 }
@@ -1100,6 +1106,9 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 
     // create hidden owner window
     HWND owner = CreateHiddenOwnerWindow(hInstance);
+    if (!owner) {
+        return EXIT_FAILURE;
+    }
 
     // display menu and handle selection
     UINT choice = DisplaySendToMenu(popupMenu, owner);
