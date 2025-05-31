@@ -302,11 +302,6 @@ static HBITMAP IconForItem(PCWSTR filePath)
 
     // Files: get icon, possibly with link overlay
     flags = SHGFI_ICON | SHGFI_SMALLICON;
-    PCWSTR extension = PathFindExtensionW(filePath);
-    if (extension && _wcsicmp(extension, L".lnk") == 0) {
-        flags |= SHGFI_LINKOVERLAY;
-    }
-
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         if (result) {
