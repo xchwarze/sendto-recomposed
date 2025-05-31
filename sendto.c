@@ -6,8 +6,10 @@
 
 #include <sdkddkver.h>
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT _WIN32_WINNT_WIN7
 #define _WIN32_IE _WIN32_IE_IE80
+#endif
 
 #include <windows.h>
 #include <stdlib.h>
@@ -206,8 +208,7 @@ static void VectorDestroy(MenuVector *vec)
 static HBITMAP CreateDIBSection32(int width, int height)
 {
     // Describe a 32-bit top-down DIB
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof bmi);
+    BITMAPINFO bmi = { 0 };
     bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth       = width;
     bmi.bmiHeader.biHeight      = -height;  // negative => top-down orientation
@@ -215,7 +216,8 @@ static HBITMAP CreateDIBSection32(int width, int height)
     bmi.bmiHeader.biBitCount    = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    return CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, NULL, NULL, 0);
+    PVOID pBits = NULL;
+    return CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
 }
 
 /**
@@ -272,12 +274,13 @@ static HBITMAP DibFromIcon(HICON iconHandle)
  */
 static HBITMAP IconForDirectory(PCWSTR directoryPath)
 {
-    SHFILEINFOW info;
+    SHFILEINFOW info = { 0 };
 
     UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
     if (SHGetFileInfoW(directoryPath, 0, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
-        DestroyIcon(info.hIcon);
+        if (info.hIcon)
+            DestroyIcon(info.hIcon);
         return result;
     }
 
@@ -786,15 +789,14 @@ static BOOL InitializeApplication(void)
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES };
     if (!InitCommonControlsEx(&icc)) {
         OutputDebugStringW(L"[SendTo+] InitCommonControlsEx failed\n");
-        OleUninitialize();
-        return FALSE;
+        goto failed;
     }
 
     // complete drag and drop setup
     const HRESULT hr = SHGetDesktopFolder(&desktopShellFolder);
     if (FAILED(hr)) {
         OutputDebugStringW(L"[SendTo+] SHGetDesktopFolder failed\n");
-        return FALSE;
+        goto failed;
     }
 
     // cache setup
@@ -807,6 +809,10 @@ static BOOL InitializeApplication(void)
     OptInDarkPopupMenus();
 
     return TRUE;
+
+failed:
+    OleUninitialize();
+    return FALSE;
 }
 
 /**
@@ -852,7 +858,7 @@ static bool ParseCommandLine(
         if (_wcsicmp(param, L"/?")==0 || _wcsicmp(param, L"-?")==0) {
             ERR_BOX(L"Error: /D requires a directory path.\n"
                     L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
-            return FALSE;
+            goto failed;
         }
 
         // override SendTo directory?
@@ -860,12 +866,12 @@ static bool ParseCommandLine(
             if (paramIndex + 1 < rawArgc) {
                 *outDir = _wcsdup(rawArgv[++paramIndex]);
                 if (!*outDir) {
-                    return FALSE;
+                    goto failed;
                 }
             } else {
                 ERR_BOX(L"Error: /D requires a directory path.\n"
                         L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
-                return FALSE;
+                goto failed;
             }
 
             continue;
@@ -885,6 +891,10 @@ static bool ParseCommandLine(
 
     *outArgv = temp;
     return TRUE;
+
+failed:
+    free(temp);
+    return FALSE;
 }
 
 /**
@@ -896,7 +906,11 @@ static PWSTR ResolveSendToDirectory(void)
 {
 	// get path to our own executable
     WCHAR exeFolder[MAX_PATH];
-    GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder));
+    if (!GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder))){
+        OutputDebugStringW(L"[SendTo+] GetModuleFileNameW failed\n");
+        return NULL;
+    }
+
     PathRemoveFileSpecW(exeFolder);
 
     const WCHAR suffix[] = L"\\sendto";
@@ -1119,10 +1133,10 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
  * @return exit code (0 success, non-zero on error).
  */
 int WINAPI wWinMain(
-    HINSTANCE hInstance,
-    HINSTANCE hPrevInstance,
-    PWSTR     lpCmdLine,
-    int       nCmdShow
+    _In_ HINSTANCE hInstance,
+    _In_opt_ HINSTANCE hPrevInstance,
+    _In_ PWSTR     lpCmdLine,
+    _In_ int       nCmdShow
 ) {
     // suppress unused-parameter warnings
     (void)hPrevInstance;
