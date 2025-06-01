@@ -5,6 +5,8 @@ Compared with the original project, this version is faster, 64-bit clean and sho
 Licensed under **GPL v3**.
 The name of this project is a [tribute to that album.](https://www.youtube.com/playlist?list=OLAK5uy_nlVsyX0dWJn0qJiTWyyxgw7nu_Z7AjeYU)
 
+![](assets/demo.gif)
+
 ## Key Ingredients
 
 * **Unicode-only** no ANSI/TCHAR branches – predictable builds 
