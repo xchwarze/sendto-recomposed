@@ -28,14 +28,10 @@
 
 #define MAX_DEPTH 5
 #define MAX_LOCAL_PATH 32767
-#define DIB_POOL_SIZE 64
 #define MENU_POOL_SIZE 64
 
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
-static HBITMAP dibPool[DIB_POOL_SIZE];
-static int dibPoolIndex = 0;
-
 
 /* -------------------------------------------------------------------------- */
 /* Utility macros                                                             */
@@ -249,13 +245,16 @@ static HBITMAP DibFromIcon(HICON iconHandle)
     }
 
     // allocate DIB section; pointer to its bits is discarded here
-    HBITMAP dibBitmap = dibPool[dibPoolIndex];
-    dibPoolIndex = (dibPoolIndex + 1) % DIB_POOL_SIZE;
+    HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
     if (dibBitmap) {
-        // Reuse the global HDC for drawing
-        HGDIOBJ oldObj = SelectObject(hdcIconCache, dibBitmap);
-        DrawIconEx(hdcIconCache, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
-        SelectObject(hdcIconCache, oldObj);
+        // create temporary DC
+        HDC drawDC = CreateCompatibleDC(NULL);
+        if (drawDC) {
+            HGDIOBJ oldObj = SelectObject(drawDC, dibBitmap);
+            DrawIconEx(drawDC, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
+            SelectObject(drawDC, oldObj);
+            DeleteDC(drawDC);
+        }
     }
 
     // Cleanup original icon and bitmaps
@@ -788,9 +787,6 @@ static BOOL InitializeApplication(void)
 
     // cache setup
     hdcIconCache = CreateCompatibleDC(NULL);
-    for (int i = 0; i < DIB_POOL_SIZE; ++i) {
-        dibPool[i] = CreateDIBSection32(24, 24);
-    }
 
     // add theme support
     OptInDarkPopupMenus();
