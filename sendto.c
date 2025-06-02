@@ -247,14 +247,10 @@ static HBITMAP DibFromIcon(HICON iconHandle)
     // allocate DIB section; pointer to its bits is discarded here
     HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
     if (dibBitmap) {
-        // create temporary DC
-        HDC drawDC = CreateCompatibleDC(NULL);
-        if (drawDC) {
-            HGDIOBJ oldObj = SelectObject(drawDC, dibBitmap);
-            DrawIconEx(drawDC, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
-            SelectObject(drawDC, oldObj);
-            DeleteDC(drawDC);
-        }
+        // use global temporary DC
+        HGDIOBJ oldObj = SelectObject(hdcIconCache, dibBitmap);
+        DrawIconEx(hdcIconCache, 0, 0, iconHandle, bmpMetrics.bmWidth, bmpMetrics.bmHeight, 0, NULL, DI_NORMAL);
+        SelectObject(hdcIconCache, oldObj);
     }
 
     // Cleanup original icon and bitmaps
@@ -279,7 +275,6 @@ static HBITMAP IconForDirectory(PCWSTR directoryPath)
     if (SHGetFileInfoW(directoryPath, 0, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         if (result) {
-            DestroyIcon(info.hIcon);
             return result;
         }
     }
@@ -304,7 +299,6 @@ static HBITMAP IconForItem(PCWSTR filePath)
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         if (result) {
-            DestroyIcon(info.hIcon);
             return result;
         }
     }
@@ -314,7 +308,6 @@ static HBITMAP IconForItem(PCWSTR filePath)
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
         if (result) {
-            DestroyIcon(info.hIcon);
             return result;
         }
     }
