@@ -1092,7 +1092,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         } else {
             // no args: open folder/link
             OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
-            ShellExecuteW(NULL, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
+            ShellExecuteW(owner, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
         }
     }
 
