@@ -32,6 +32,7 @@
 
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
+static MenuVector *g_menuItems = NULL;
 
 /* -------------------------------------------------------------------------- */
 /* Utility macros                                                             */
@@ -317,6 +318,52 @@ static HBITMAP IconForItem(PCWSTR filePath)
 
 
 /* -------------------------------------------------------------------------- */
+/* Window procedure                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * SendToWndProc – window procedure for the hidden owner window.
+ *
+ * Handles WM_INITMENUPOPUP to lazily resolve shell icons for file items
+ * just before each popup/submenu is displayed, avoiding the upfront cost
+ * of resolving all icons at enumeration time.
+ *
+ * @param hwnd    Handle to the owner window.
+ * @param msg     Message identifier.
+ * @param wParam  Additional message information (HMENU for WM_INITMENUPOPUP).
+ * @param lParam  Additional message information.
+ * @return        Result of message processing; 0 for handled messages,
+ *                otherwise the result from DefWindowProcW.
+ */
+static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_INITMENUPOPUP) {
+        HMENU hMenu = (HMENU)wParam;
+        int count = GetMenuItemCount(hMenu);
+        for (int i = 0; i < count; i++) {
+            MENUITEMINFOW mii = { sizeof(mii) };
+            mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_SUBMENU;
+            if (!GetMenuItemInfoW(hMenu, i, TRUE, &mii)) continue;
+            if (mii.hSubMenu || mii.hbmpItem || mii.wID == 0) continue;
+
+            UINT idx = mii.wID - 1;
+            if (idx < g_menuItems->count && !g_menuItems->items[idx].icon) {
+                HBITMAP icon = IconForItem(g_menuItems->items[idx].path);
+                g_menuItems->items[idx].icon = icon;
+                mii.fMask   = MIIM_BITMAP;
+                mii.hbmpItem = icon;
+                SetMenuItemInfoW(hMenu, i, TRUE, &mii);
+            }
+        }
+
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+
+/* -------------------------------------------------------------------------- */
 /* Menu population                                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -497,7 +544,8 @@ static HRESULT EnumerateFolder(
             EnumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
         } else {
             // Retrieve icon bitmap for this entry
-            HBITMAP icon = IconForItem(childPath);
+            //HBITMAP icon = IconForItem(childPath);
+            HBITMAP icon = NULL;
 
             // For files, insert a regular file item
             AddFileItem(menu, findData.cFileName, icon, (*nextCmdId)++,
@@ -982,7 +1030,8 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
     const wchar_t CLASS_NAME[] = L"SendToOwnerWindow";
     const WNDCLASSEXW wc = {
         .cbSize        = sizeof(WNDCLASSEXW),
-        .lpfnWndProc   = DefWindowProcW,
+        //.lpfnWndProc   = DefWindowProcW,
+        .lpfnWndProc   = SendToWndProc,
         .hInstance     = hInstance,
         .lpszClassName = CLASS_NAME
     };
@@ -1082,6 +1131,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
     }
 
     // display menu and handle selection
+    g_menuItems = &menuItems;
     UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
