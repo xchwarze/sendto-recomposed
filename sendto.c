@@ -1035,7 +1035,6 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
     const wchar_t CLASS_NAME[] = L"SendToOwnerWindow";
     const WNDCLASSEXW wc = {
         .cbSize        = sizeof(WNDCLASSEXW),
-        //.lpfnWndProc   = DefWindowProcW,
         .lpfnWndProc   = SendToWndProc,
         .hInstance     = hInstance,
         .lpszClassName = CLASS_NAME
@@ -1084,7 +1083,7 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 
     const UINT cmd = TrackPopupMenuEx(
         popup,
-        TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_LEFTBUTTON,
+        TPM_RETURNCMD | TPM_LEFTALIGN | TPM_LEFTBUTTON,
         cursor.x, cursor.y,
         owner,
         NULL
