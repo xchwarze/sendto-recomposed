@@ -32,7 +32,6 @@
 
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
-static MenuVector *g_menuItems = NULL;
 
 /* -------------------------------------------------------------------------- */
 /* Utility macros                                                             */
@@ -115,6 +114,12 @@ typedef struct {
     UINT       count;
     UINT       capacity;
 } MenuVector;
+
+/**
+ * Pointer to the active menu-item vector; used by SendToWndProc to
+ * lazily resolve icons on WM_INITMENUPOPUP. Set once in RunSendTo().
+ */
+static MenuVector *g_menuItems = NULL;
 
 /**
  * VectorEnsureCapacity – make room for at least @need elements.
