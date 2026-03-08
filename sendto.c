@@ -1230,12 +1230,17 @@ static HRESULT EnumerateFolder(
             // Retrieve icon bitmap via unified cache-aware resolver
             HBITMAP icon = CachedIconForItem(childPath);
 
+            // Store in vector first — if this fails, nothing was added to the
+            // menu yet so we can cleanly bail out without orphaning resources.
+            if (!VectorPush(items, childPath, icon)) {
+                if (icon) DeleteObject(icon);
+                DestroyMenu(subMenu);
+                continue;
+            }
+
             // Insert directory item with icon and context-help ID
             AddDirectoryItem(menu, entry->cFileName,
                              icon, subMenu, *nextCmdId);
-
-            // Store in vector for later invocation
-            VectorPush(items, childPath, icon);
             (*nextCmdId)++;
 
             // Recurse into the subdirectory
