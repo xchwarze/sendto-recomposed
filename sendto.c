@@ -30,6 +30,10 @@
 #define MAX_LOCAL_PATH 32767
 #define MENU_POOL_SIZE 64
 
+/** Binary cache file signature: "STC\0" (SendTo Cache). */
+#define CACHE_MAGIC  0x00435453
+#define CACHE_VERSION 1
+
 static LPSHELLFOLDER desktopShellFolder = NULL;
 static HDC hdcIconCache = NULL;
 
@@ -92,9 +96,9 @@ static void OptInDarkPopupMenus(void)
 /* -------------------------------------------------------------------------- */
 
 /**
- * MenuEntry – one “Send To” item.
+ * MenuEntry – one "Send To" item.
  *
- * @member path  Heap-alloc’d absolute path (owner).
+ * @member path  Heap-alloc'd absolute path (owner).
  * @member icon  32-bit ARGB bitmap for the menu (may be NULL).
  */
 typedef struct {
@@ -105,7 +109,7 @@ typedef struct {
 /**
  * MenuVector – simple grow-only array.
  *
- * @member items     Pointer to contiguous buffer (realloc’d).
+ * @member items     Pointer to contiguous buffer (realloc'd).
  * @member count     Elements currently stored.
  * @member capacity  Allocated slots in @items.
  */
@@ -323,6 +327,379 @@ static HBITMAP IconForItem(PCWSTR filePath)
 
 
 /* -------------------------------------------------------------------------- */
+/* Persistent icon cache                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * IconCacheEntry – one cached icon with its invalidation key.
+ *
+ * @member path       Absolute path of the file this icon belongs to.
+ * @member lastWrite  Last-write timestamp of the file when the icon was resolved.
+ * @member width      Bitmap width in pixels.
+ * @member height     Bitmap height in pixels.
+ * @member pixels     Heap-alloc'd raw 32-bit ARGB pixel data (width*height*4 bytes).
+ */
+typedef struct {
+    WCHAR    path[MAX_PATH];
+    FILETIME lastWrite;
+    int      width;
+    int      height;
+    BYTE     *pixels;
+} IconCacheEntry;
+
+/**
+ * IconCache – in-memory store of cached icons loaded from / saved to disk.
+ *
+ * @member entries   Pointer to contiguous buffer of cache entries.
+ * @member count     Number of entries currently stored.
+ * @member capacity  Allocated slots in @entries.
+ * @member dirty     TRUE if any entry was added or updated since last save.
+ */
+typedef struct {
+    IconCacheEntry *entries;
+    UINT            count;
+    UINT            capacity;
+    bool            dirty;
+} IconCache;
+
+/** Global icon cache instance; only active when /C flag is passed. */
+static IconCache g_iconCache = { 0 };
+
+/** Whether persistent icon caching is enabled (set via /C flag). */
+static bool g_useCacheFlag = FALSE;
+
+/**
+ * GetFileLastWriteTime – retrieve the last-write FILETIME for a path.
+ *
+ * @param path       Null-terminated wide string path.
+ * @param outTime    Receives the FILETIME on success.
+ * @return           TRUE on success, FALSE on failure.
+ */
+static BOOL GetFileLastWriteTime(PCWSTR path, FILETIME *outTime)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attrs;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &attrs)) {
+        return FALSE;
+    }
+    *outTime = attrs.ftLastWriteTime;
+    return TRUE;
+}
+
+/**
+ * ResolveCacheFilePath – build the path to "sendto.cache" next to the executable.
+ *
+ * @param outPath  Buffer of at least MAX_PATH WCHARs to receive the result.
+ * @return         TRUE on success, FALSE on failure.
+ */
+static BOOL ResolveCacheFilePath(WCHAR outPath[MAX_PATH])
+{
+    if (!GetModuleFileNameW(NULL, outPath, MAX_PATH)) {
+        return FALSE;
+    }
+    PathRemoveFileSpecW(outPath);
+    return PathAppendW(outPath, L"sendto.cache");
+}
+
+/**
+ * IconCacheLoad – read the cache file from disk into g_iconCache.
+ *
+ * Silently succeeds (with zero entries) if the file doesn't exist or is
+ * corrupt.  Only entries whose on-disk format matches CACHE_VERSION are loaded.
+ */
+static void IconCacheLoad(void)
+{
+    WCHAR cacheFile[MAX_PATH];
+    if (!ResolveCacheFilePath(cacheFile)) {
+        return;
+    }
+
+    HANDLE hFile = CreateFileW(
+        cacheFile, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    DWORD bytesRead;
+
+    // read and validate header
+    DWORD magic = 0, version = 0, entryCount = 0;
+    if (!ReadFile(hFile, &magic, sizeof magic, &bytesRead, NULL) || magic != CACHE_MAGIC) {
+        goto done;
+    }
+    if (!ReadFile(hFile, &version, sizeof version, &bytesRead, NULL) || version != CACHE_VERSION) {
+        goto done;
+    }
+    if (!ReadFile(hFile, &entryCount, sizeof entryCount, &bytesRead, NULL)) {
+        goto done;
+    }
+
+    // allocate entries
+    g_iconCache.entries = calloc(entryCount, sizeof *g_iconCache.entries);
+    if (!g_iconCache.entries) {
+        goto done;
+    }
+    g_iconCache.capacity = entryCount;
+
+    for (DWORD i = 0; i < entryCount; ++i) {
+        IconCacheEntry *e = &g_iconCache.entries[i];
+
+        // read path length (in WCHARs including null terminator)
+        DWORD pathLen = 0;
+        if (!ReadFile(hFile, &pathLen, sizeof pathLen, &bytesRead, NULL)) goto done;
+        if (pathLen == 0 || pathLen > MAX_PATH) goto done;
+
+        // read path
+        if (!ReadFile(hFile, e->path, pathLen * sizeof(WCHAR), &bytesRead, NULL)) goto done;
+
+        // read timestamp
+        if (!ReadFile(hFile, &e->lastWrite, sizeof e->lastWrite, &bytesRead, NULL)) goto done;
+
+        // read dimensions
+        if (!ReadFile(hFile, &e->width, sizeof e->width, &bytesRead, NULL)) goto done;
+        if (!ReadFile(hFile, &e->height, sizeof e->height, &bytesRead, NULL)) goto done;
+
+        if (e->width <= 0 || e->height <= 0 || e->width > 256 || e->height > 256) goto done;
+
+        // read pixel data
+        DWORD pixelSize = (DWORD)(e->width * e->height * 4);
+        e->pixels = malloc(pixelSize);
+        if (!e->pixels) goto done;
+        if (!ReadFile(hFile, e->pixels, pixelSize, &bytesRead, NULL) || bytesRead != pixelSize) {
+            free(e->pixels);
+            e->pixels = NULL;
+            goto done;
+        }
+
+        g_iconCache.count++;
+    }
+
+done:
+    CloseHandle(hFile);
+}
+
+/**
+ * IconCacheSave – write the current g_iconCache contents to disk.
+ *
+ * Only writes if the cache has been marked dirty (new or updated entries).
+ * Overwrites the existing cache file atomically is not attempted; a simple
+ * truncate-and-rewrite is used.
+ */
+static void IconCacheSave(void)
+{
+    if (!g_iconCache.dirty || g_iconCache.count == 0) {
+        return;
+    }
+
+    WCHAR cacheFile[MAX_PATH];
+    if (!ResolveCacheFilePath(cacheFile)) {
+        return;
+    }
+
+    HANDLE hFile = CreateFileW(
+        cacheFile, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL
+    );
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    DWORD written;
+
+    // write header
+    DWORD magic   = CACHE_MAGIC;
+    DWORD version = CACHE_VERSION;
+    DWORD count   = g_iconCache.count;
+    WriteFile(hFile, &magic,   sizeof magic,   &written, NULL);
+    WriteFile(hFile, &version, sizeof version, &written, NULL);
+    WriteFile(hFile, &count,   sizeof count,   &written, NULL);
+
+    for (UINT i = 0; i < g_iconCache.count; ++i) {
+        IconCacheEntry *e = &g_iconCache.entries[i];
+        if (!e->pixels) continue;
+
+        // write path length + path
+        DWORD pathLen = (DWORD)(wcslen(e->path) + 1);
+        WriteFile(hFile, &pathLen, sizeof pathLen, &written, NULL);
+        WriteFile(hFile, e->path, pathLen * sizeof(WCHAR), &written, NULL);
+
+        // write timestamp
+        WriteFile(hFile, &e->lastWrite, sizeof e->lastWrite, &written, NULL);
+
+        // write dimensions
+        WriteFile(hFile, &e->width,  sizeof e->width,  &written, NULL);
+        WriteFile(hFile, &e->height, sizeof e->height, &written, NULL);
+
+        // write pixel data
+        DWORD pixelSize = (DWORD)(e->width * e->height * 4);
+        WriteFile(hFile, e->pixels, pixelSize, &written, NULL);
+    }
+
+    CloseHandle(hFile);
+}
+
+/**
+ * IconCacheDestroy – free all heap memory held by g_iconCache.
+ */
+static void IconCacheDestroy(void)
+{
+    for (UINT i = 0; i < g_iconCache.count; ++i) {
+        free(g_iconCache.entries[i].pixels);
+    }
+    free(g_iconCache.entries);
+    ZeroMemory(&g_iconCache, sizeof g_iconCache);
+}
+
+/**
+ * IconCacheLookup – search for a cached icon matching @path and its current
+ *                   last-write timestamp.
+ *
+ * @param path   Null-terminated wide string path of the file to look up.
+ * @return       A new HBITMAP created from cached pixel data if a valid entry
+ *               exists, or NULL if not found or stale.
+ */
+static HBITMAP IconCacheLookup(PCWSTR path)
+{
+    FILETIME ft;
+    if (!GetFileLastWriteTime(path, &ft)) {
+        return NULL;
+    }
+
+    for (UINT i = 0; i < g_iconCache.count; ++i) {
+        IconCacheEntry *e = &g_iconCache.entries[i];
+        if (_wcsicmp(e->path, path) != 0) continue;
+        if (CompareFileTime(&e->lastWrite, &ft) != 0) continue;
+        if (!e->pixels) continue;
+
+        // rebuild HBITMAP from cached pixels
+        BITMAPINFO bmi = { 0 };
+        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth       = e->width;
+        bmi.bmiHeader.biHeight      = -(e->height);
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        PVOID pBits = NULL;
+        HBITMAP hbm = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+        if (hbm && pBits) {
+            memcpy(pBits, e->pixels, (size_t)(e->width * e->height * 4));
+        }
+        return hbm;
+    }
+
+    return NULL;
+}
+
+/**
+ * IconCacheStore – add or update a cache entry for the given path and bitmap.
+ *
+ * Extracts the raw 32-bit pixel data from @hbm via GetDIBits and stores it
+ * alongside the file's current last-write timestamp.  Marks the cache dirty.
+ *
+ * @param path  Null-terminated wide string path of the file.
+ * @param hbm   32-bit ARGB HBITMAP whose pixels will be copied into the cache.
+ */
+static void IconCacheStore(PCWSTR path, HBITMAP hbm)
+{
+    if (!hbm) return;
+
+    FILETIME ft;
+    if (!GetFileLastWriteTime(path, &ft)) {
+        return;
+    }
+
+    // get bitmap dimensions
+    BITMAP bm;
+    if (!GetObject(hbm, sizeof bm, &bm)) return;
+    if (bm.bmWidth <= 0 || bm.bmHeight <= 0) return;
+
+    DWORD pixelSize = (DWORD)(bm.bmWidth * bm.bmHeight * 4);
+    BYTE *pixels = malloc(pixelSize);
+    if (!pixels) return;
+
+    // extract pixel data from the HBITMAP
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = bm.bmWidth;
+    bmi.bmiHeader.biHeight      = -(bm.bmHeight); // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdc = GetDC(NULL);
+    int scanlines = GetDIBits(hdc, hbm, 0, bm.bmHeight, pixels, &bmi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdc);
+
+    if (scanlines == 0) {
+        free(pixels);
+        return;
+    }
+
+    // check if entry already exists (stale) and update in-place
+    for (UINT i = 0; i < g_iconCache.count; ++i) {
+        IconCacheEntry *e = &g_iconCache.entries[i];
+        if (_wcsicmp(e->path, path) != 0) continue;
+
+        free(e->pixels);
+        e->lastWrite = ft;
+        e->width     = bm.bmWidth;
+        e->height    = bm.bmHeight;
+        e->pixels    = pixels;
+        g_iconCache.dirty = TRUE;
+        return;
+    }
+
+    // new entry — grow array if needed
+    if (g_iconCache.count >= g_iconCache.capacity) {
+        UINT newCap = g_iconCache.capacity ? g_iconCache.capacity * 2 : 128;
+        IconCacheEntry *tmp = realloc(g_iconCache.entries, newCap * sizeof *tmp);
+        if (!tmp) {
+            free(pixels);
+            return;
+        }
+        ZeroMemory(tmp + g_iconCache.capacity,
+                   (newCap - g_iconCache.capacity) * sizeof *tmp);
+        g_iconCache.entries  = tmp;
+        g_iconCache.capacity = newCap;
+    }
+
+    IconCacheEntry *e = &g_iconCache.entries[g_iconCache.count++];
+    StringCchCopyW(e->path, MAX_PATH, path);
+    e->lastWrite = ft;
+    e->width     = bm.bmWidth;
+    e->height    = bm.bmHeight;
+    e->pixels    = pixels;
+    g_iconCache.dirty = TRUE;
+}
+
+/**
+ * CachedIconForItem – resolve a file icon, using the persistent cache when
+ *                     available.  On cache miss, falls back to IconForItem()
+ *                     and stores the result for next time.
+ *
+ * @param filePath  Null-terminated wide string path to a file.
+ * @return          32-bit ARGB HBITMAP, or NULL on failure.
+ */
+static HBITMAP CachedIconForItem(PCWSTR filePath)
+{
+    if (g_useCacheFlag) {
+        HBITMAP cached = IconCacheLookup(filePath);
+        if (cached) return cached;
+    }
+
+    HBITMAP icon = IconForItem(filePath);
+
+    if (icon && g_useCacheFlag) {
+        IconCacheStore(filePath, icon);
+    }
+
+    return icon;
+}
+
+
+/* -------------------------------------------------------------------------- */
 /* Window procedure                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -353,7 +730,7 @@ static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             UINT idx = mii.wID - 1;
             if (idx < g_menuItems->count && !g_menuItems->items[idx].icon) {
-                HBITMAP icon = IconForItem(g_menuItems->items[idx].path);
+                HBITMAP icon = CachedIconForItem(g_menuItems->items[idx].path);
                 g_menuItems->items[idx].icon = icon;
                 mii.fMask   = MIIM_BITMAP;
                 mii.hbmpItem = icon;
@@ -465,7 +842,7 @@ static void AddDirectoryItem(
 
     // Associate a help/context-ID with the submenu itself
     MENUINFO menuInfo        = { sizeof(menuInfo) };
-    menuInfo.fMask           = MIM_HELPID | MIM_STYLE; // we’re setting dwContextHelpID
+    menuInfo.fMask           = MIM_HELPID | MIM_STYLE; // we're setting dwContextHelpID
     menuInfo.dwContextHelpID = helpId;                 // ID used to look up real path
     menuInfo.dwStyle         = MNS_AUTODISMISS
                                | MNS_NOTIFYBYPOS;
@@ -548,8 +925,7 @@ static HRESULT EnumerateFolder(
             // Recurse into the subdirectory
             EnumerateFolder(subMenu, childPath, nextCmdId, depth + 1, items);
         } else {
-            // Retrieve icon bitmap for this entry
-            //HBITMAP icon = IconForItem(childPath);
+            // Icon resolved lazily in WM_INITMENUPOPUP via CachedIconForItem
             HBITMAP icon = NULL;
 
             // For files, insert a regular file item
@@ -847,12 +1223,18 @@ failed:
 /**
  * ParseCommandLine - Parses switches and returns a clean argv[].
  *
+ * Recognised switches:
+ *   /D <dir>  – override the SendTo directory.
+ *   /C        – enable persistent icon cache (sendto.cache).
+ *   /?  -?    – show usage and exit.
+ *
  * @param  rawArgc      Argument count from CommandLineToArgvW().
  * @param  rawArgv      Argument vector from CommandLineToArgvW().
- * @param  outDir       Receives a malloc’d wide string if “/D <dir>” was supplied.
+ * @param  outDir       Receives a malloc'd wide string if "/D <dir>" was supplied.
  *                      Caller must free() it when done.  May be NULL.
+ * @param  outUseCache  Receives TRUE if "/C" was supplied.
  * @param  outArgc      Receives the new argument count.
- * @param  outArgv      Receives a malloc’d PWSTR[] of length outArgc:
+ * @param  outArgv      Receives a malloc'd PWSTR[] of length outArgc:
  *                      [0] = rawArgv[0] (exe path)
  *                      [1..] = only the file arguments.
  *                      Caller must free() the array (not the strings).
@@ -863,12 +1245,14 @@ static bool ParseCommandLine(
     int     rawArgc,
     PWSTR   *rawArgv,
     PWSTR   *outDir,
+    bool    *outUseCache,
     int     *outArgc,
     PWSTR   **outArgv
 ) {
-    *outDir  = NULL;
-    *outArgc = 1;                   // always keep exe @ index 0
-    *outArgv = NULL;
+    *outDir      = NULL;
+    *outUseCache = FALSE;
+    *outArgc     = 1;                   // always keep exe @ index 0
+    *outArgv     = NULL;
 
     // allocate worst-case full array
     PWSTR *temp = malloc(rawArgc * sizeof *temp);
@@ -885,8 +1269,9 @@ static bool ParseCommandLine(
 
         // help?
         if (_wcsicmp(param, L"/?")==0 || _wcsicmp(param, L"-?")==0) {
-            ERR_BOX(L"Error: /D requires a directory path.\n"
-                    L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
+            ERR_BOX(L"Usage: SendTo+ [/D <directory>] [/C] [<file1> <file2> ...]\n\n"
+                    L"  /D <dir>  Override the SendTo folder path.\n"
+                    L"  /C        Enable persistent icon cache.");
             goto failed;
         }
 
@@ -899,10 +1284,16 @@ static bool ParseCommandLine(
                 }
             } else {
                 ERR_BOX(L"Error: /D requires a directory path.\n"
-                        L"Usage: SendTo+ [/D <directory>] [<file1> <file2> ...]");
+                        L"Usage: SendTo+ [/D <directory>] [/C] [<file1> <file2> ...]");
                 goto failed;
             }
 
+            continue;
+        }
+
+        // enable persistent icon cache?
+        if (_wcsicmp(param, L"/C")==0) {
+            *outUseCache = TRUE;
             continue;
         }
 
@@ -929,7 +1320,7 @@ failed:
 /**
  * ResolveSendToDirectory – build full path to "<exe folder>\\sendto" with \\?\ prefix.
  *
- * @return malloc’d wide string on success (must be freed), or NULL on failure.
+ * @return malloc'd wide string on success (must be freed), or NULL on failure.
  */
 static PWSTR ResolveSendToDirectory(void)
 {
@@ -1109,8 +1500,15 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
     int cleanArgc = 0;
     PWSTR *cleanArgv = NULL;
     PWSTR sendToDir = NULL;
-    if (!ParseCommandLine(argc, argv, &sendToDir, &cleanArgc, &cleanArgv)) {
+    bool useCache = FALSE;
+    if (!ParseCommandLine(argc, argv, &sendToDir, &useCache, &cleanArgc, &cleanArgv)) {
         return EXIT_FAILURE;
+    }
+
+    // set global cache flag and load cache file if enabled
+    g_useCacheFlag = useCache;
+    if (g_useCacheFlag) {
+        IconCacheLoad();
     }
 
     if (!sendToDir) {
@@ -1148,6 +1546,12 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
             OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
             ShellExecuteW(owner, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
         }
+    }
+
+    // persist icon cache to disk if it was modified
+    if (g_useCacheFlag) {
+        IconCacheSave();
+        IconCacheDestroy();
     }
 
     // release COM desktop folder
