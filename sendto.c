@@ -1555,6 +1555,10 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
     UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
+
+        // Allow the spawned process to bring its window to the foreground
+        AllowSetForegroundWindow(ASFW_ANY);
+        
         if (cleanArgc > 1) {
             // with args: perform drag-and-drop
             OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
@@ -1562,7 +1566,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         } else {
             // no args: open folder/link
             OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
-            ShellExecuteW(owner, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
+            ShellExecuteW(NULL, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
         }
     }
 
