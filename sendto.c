@@ -88,6 +88,9 @@ static void OptInDarkPopupMenus(void)
     if (pFlushMenuThemes) {
         pFlushMenuThemes();
     }
+
+    // Release the library – the theme mode is already applied process-wide
+    FreeLibrary(uxThemeModule);
 }
 
 
@@ -1507,6 +1510,10 @@ static bool ParseCommandLine(
     return TRUE;
 
 failed:
+    // clean up /D allocation if it was set before the error
+    free(*outDir);
+    *outDir = NULL;
+
     free(temp);
     return FALSE;
 }
@@ -1798,13 +1805,19 @@ static void TeardownIconCache(void)
 }
 
 /**
- * ShutdownApplication – release global COM resources and uninitialise OLE.
+ * ShutdownApplication – release global GDI and COM resources, uninitialise OLE.
  *
  * Must be called once at the end of RunSendTo, after all COM operations
  * (drag-and-drop, ShellExecuteEx, etc.) have completed.
  */
 static void ShutdownApplication(void)
 {
+    // release the temporary DC used by DibFromIcon for icon rendering
+    if (hdcIconCache) {
+        DeleteDC(hdcIconCache);
+        hdcIconCache = NULL;
+    }
+
     SAFE_RELEASE(desktopShellFolder);
     OleUninitialize();
 }
@@ -1812,19 +1825,28 @@ static void ShutdownApplication(void)
 /**
  * RunSendTo – perform full SendTo+ workflow.
  *
- * @hInstance    application instance.
- * @argc         argument count.
- * @argv         argument vector (wide).
- * @return       exit code (0 success, non-zero on error).
+ * Uses a single-exit cleanup pattern (goto) so that all heap allocations,
+ * menu handles, and vector storage are released on every code path —
+ * including early failures and user cancellation.
+ *
+ * @param hInstance    application instance.
+ * @param argc         argument count.
+ * @param argv         argument vector (wide).
+ * @return             exit code (0 success, non-zero on error).
  */
 static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 {
-    int cleanArgc = 0;
-    PWSTR *cleanArgv = NULL;
-    PWSTR sendToDir = NULL;
-    bool useCache = FALSE;
+    int exitCode         = EXIT_FAILURE;
+    int cleanArgc        = 0;
+    PWSTR *cleanArgv     = NULL;
+    PWSTR sendToDir      = NULL;
+    bool useCache        = FALSE;
+    HMENU popupMenu      = NULL;
+    HWND owner           = NULL;
+    MenuVector menuItems = { 0 };
+
     if (!ParseCommandLine(argc, argv, &sendToDir, &useCache, &cleanArgc, &cleanArgv)) {
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     SetupIconCache(useCache);
@@ -1834,20 +1856,18 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
     }
 
     if (!ValidateSendToDirectory(sendToDir)) {
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     // build popup menu and items
-    HMENU popupMenu;
-    MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     // create hidden owner window
-    HWND owner = CreateHiddenOwnerWindow(hInstance);
+    owner = CreateHiddenOwnerWindow(hInstance);
     if (!owner) {
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     // display menu and handle selection
@@ -1865,13 +1885,31 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         }
     }
 
+    exitCode = EXIT_SUCCESS;
+
+cleanup:
     // persist icon cache to disk if it was modified
     TeardownIconCache();
 
-    // release COM desktop folder
+    // destroy menu tree and item vector (safe even if never initialised)
+    if (popupMenu) {
+        DestroyMenu(popupMenu);
+    }
+    VectorDestroy(&menuItems);
+
+    // free heap-allocated argument data
+    free(sendToDir);
+    free(cleanArgv);
+
+    // destroy hidden owner window
+    if (owner) {
+        DestroyWindow(owner);
+    }
+
+    // release COM desktop folder and uninitialise OLE
     ShutdownApplication();
 
-    return EXIT_SUCCESS;
+    return exitCode;
 }
 
 /**
@@ -1902,9 +1940,14 @@ int WINAPI wWinMain(
     int rawArgc;
     PWSTR *rawArgv = CommandLineToArgvW(GetCommandLineW(), &rawArgc);
     if (!rawArgv) {
+        ShutdownApplication();
         return EXIT_FAILURE;
     }
 
-    // se fini
-    return RunSendTo(hInstance, rawArgc, rawArgv);
+    int exitCode = RunSendTo(hInstance, rawArgc, rawArgv);
+
+    // CommandLineToArgvW allocates via LocalAlloc — must be freed here
+    LocalFree(rawArgv);
+
+    return exitCode;
 }
