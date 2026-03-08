@@ -1724,6 +1724,107 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 }
 
 /**
+ * HandleOpenTarget – no-args branch: open a folder or .lnk target and bring
+ *                    its window to the foreground.
+ *
+ * Uses ShellExecuteExW (instead of ShellExecuteW) so we can obtain the new
+ * process handle, wait until its window is ready, and force it to the
+ * foreground via ActivateTargetWindow.
+ *
+ * @param owner  HWND of the hidden owner window (used as ShellExecute context).
+ * @param item   Selected MenuEntry whose .path is the file/folder to open.
+ */
+static void HandleOpenTarget(HWND owner, const MenuEntry *item)
+{
+    OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
+
+    // Allow the new process to call SetForegroundWindow on itself if it wants to.
+    AllowSetForegroundWindow(ASFW_ANY);
+
+    SHELLEXECUTEINFOW sei  = { sizeof(sei) };
+    sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.hwnd   = owner;
+    sei.lpFile = item->path;
+    sei.nShow  = SW_SHOWNORMAL;
+
+    if (ShellExecuteExW(&sei) && sei.hProcess) {
+        // Wait for the new process to create its window, then
+        // force it to the foreground like any normal menu action.
+        ActivateTargetWindow(item, sei.hProcess);
+        CloseHandle(sei.hProcess);
+    }
+}
+
+/**
+ * HandleSendFiles – drag-and-drop branch: send @argv[1…] to the selected
+ *                   target and bring its window to the foreground.
+ *
+ * Delegates the actual COM drag-and-drop to ExecuteDragDrop, then calls
+ * ActivateTargetWindow (hProcess = NULL) to locate and activate the
+ * already-running target process.
+ *
+ * @param owner  HWND of the hidden owner window (used as COM context).
+ * @param item   Selected MenuEntry whose .path is the drop-target folder/app.
+ * @param argc   Full argument count (argv[0] = exe, argv[1…] = source files).
+ * @param argv   Argument vector; argv[1…argc-1] are the files to send.
+ */
+static void HandleSendFiles(HWND owner, const MenuEntry *item, int argc, PWSTR *argv)
+{
+    OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
+
+    // Allow the drop-target process to call SetForegroundWindow on itself if it wants to.
+    AllowSetForegroundWindow(ASFW_ANY);
+
+    ExecuteDragDrop(owner, item, argc, argv);
+
+    // Activate the drop-target window so it comes to the foreground,
+    // as expected from any standard context-menu "Send To" action.
+    ActivateTargetWindow(item, NULL);
+}
+
+/**
+ * SetupIconCache – apply the /C flag globally and load the cache file from disk.
+ *
+ * Centralises the two-step setup so RunSendTo stays at the orchestration level.
+ *
+ * @param useCache  TRUE if the /C flag was passed on the command line.
+ */
+static void SetupIconCache(bool useCache)
+{
+    g_useCacheFlag = useCache;
+    if (g_useCacheFlag) {
+        IconCacheLoad();
+    }
+}
+
+/**
+ * TeardownIconCache – persist any dirty cache entries to disk and free memory.
+ *
+ * No-op when caching is disabled (g_useCacheFlag == FALSE).
+ */
+static void TeardownIconCache(void)
+{
+    if (!g_useCacheFlag) {
+        return;
+    }
+
+    IconCacheSave();
+    IconCacheDestroy();
+}
+
+/**
+ * ShutdownApplication – release global COM resources and uninitialise OLE.
+ *
+ * Must be called once at the end of RunSendTo, after all COM operations
+ * (drag-and-drop, ShellExecuteEx, etc.) have completed.
+ */
+static void ShutdownApplication(void)
+{
+    SAFE_RELEASE(desktopShellFolder);
+    OleUninitialize();
+}
+
+/**
  * RunSendTo – perform full SendTo+ workflow.
  *
  * @hInstance    application instance.
@@ -1733,7 +1834,6 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
  */
 static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 {
-    // build and verify sendto directory
     int cleanArgc = 0;
     PWSTR *cleanArgv = NULL;
     PWSTR sendToDir = NULL;
@@ -1742,11 +1842,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         return EXIT_FAILURE;
     }
 
-    // set global cache flag and load cache file if enabled
-    g_useCacheFlag = useCache;
-    if (g_useCacheFlag) {
-        IconCacheLoad();
-    }
+    SetupIconCache(useCache);
 
     if (!sendToDir) {
         sendToDir = ResolveSendToDirectory();
@@ -1756,66 +1852,39 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         return EXIT_FAILURE;
     }
 
-    // build popup menu and items
+	// build popup menu and items
     HMENU popupMenu;
     MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
         return EXIT_FAILURE;
     }
 
-    // create hidden owner window
+	// create hidden owner window
     HWND owner = CreateHiddenOwnerWindow(hInstance);
     if (!owner) {
         return EXIT_FAILURE;
     }
 
-    // display menu and handle selection
+	// display menu and handle selection
     g_menuItems = &menuItems;
     UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
 
-        // Allow the spawned process to bring its window to the foreground
-        AllowSetForegroundWindow(ASFW_ANY);
-
         if (cleanArgc > 1) {
-            // with args: perform drag-and-drop
-            OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
-            ExecuteDragDrop(owner, item, cleanArgc, cleanArgv);
-
-            // Activate the drop-target window so it comes to the foreground,
-            // as expected from any standard context-menu "Send To" action.
-            ActivateTargetWindow(item, NULL);
+        	// with args: perform drag-and-drop
+            HandleSendFiles(owner, item, cleanArgc, cleanArgv);
         } else {
-            // no args: open folder/link
-            OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
-
-            // Use ShellExecuteExW instead of ShellExecuteW so we can obtain
-            // the process handle and wait for the window to become ready.
-            SHELLEXECUTEINFOW sei  = { sizeof(sei) };
-            sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
-            sei.hwnd   = owner;
-            sei.lpFile = item->path;
-            sei.nShow  = SW_SHOWNORMAL;
-
-            if (ShellExecuteExW(&sei) && sei.hProcess) {
-                // Wait for the new process to create its window, then
-                // force it to the foreground like any normal menu action.
-                ActivateTargetWindow(item, sei.hProcess);
-                CloseHandle(sei.hProcess);
-            }
+        	// no args: open folder/link
+            HandleOpenTarget(owner, item);
         }
     }
 
-    // persist icon cache to disk if it was modified
-    if (g_useCacheFlag) {
-        IconCacheSave();
-        IconCacheDestroy();
-    }
-
+	// persist icon cache to disk if it was modified
+    TeardownIconCache();
+    
     // release COM desktop folder
-    SAFE_RELEASE(desktopShellFolder);
-    OleUninitialize();
+    ShutdownApplication();
 
     return EXIT_SUCCESS;
 }
