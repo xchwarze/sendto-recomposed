@@ -721,34 +721,45 @@ static HBITMAP CachedIconForItem(PCWSTR filePath)
  */
 static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    if (msg == WM_INITMENUPOPUP) {
-        HMENU hMenu = (HMENU)wParam;
-        int count = GetMenuItemCount(hMenu);
-        for (int i = 0; i < count; i++) {
-            MENUITEMINFOW mii = { sizeof(mii) };
-            mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_SUBMENU;
-            if (!GetMenuItemInfoW(hMenu, i, TRUE, &mii)) {
-                continue;
-            }
-
-            if (mii.hSubMenu || mii.hbmpItem || mii.wID == 0) {
-                continue;
-            }
-
-            UINT idx = mii.wID - 1;
-            if (idx < g_menuItems->count && !g_menuItems->items[idx].icon) {
-                HBITMAP icon = CachedIconForItem(g_menuItems->items[idx].path);
-                g_menuItems->items[idx].icon = icon;
-                mii.fMask   = MIIM_BITMAP;
-                mii.hbmpItem = icon;
-                SetMenuItemInfoW(hMenu, i, TRUE, &mii);
-            }
-        }
-
-        return 0;
+    // Forward all unhandled messages to the default procedure
+    if (msg != WM_INITMENUPOPUP) {
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    HMENU hMenu = (HMENU)wParam;
+    int count = GetMenuItemCount(hMenu);
+
+    // Show loading cursor while shell icons are being resolved
+    HCURSOR hPrev = SetCursor(LoadCursor(NULL, IDC_APPSTARTING));
+
+    // Lazily resolve shell icons for each undecorated file item in this popup
+    for (int i = 0; i < count; i++) {
+        MENUITEMINFOW mii = { sizeof(mii) };
+        mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(hMenu, i, TRUE, &mii)) {
+            continue;
+        }
+
+        // Skip submenus (directories), already-iconified items, and separators
+        if (mii.hSubMenu || mii.hbmpItem || mii.wID == 0) {
+            continue;
+        }
+
+        // wID is 1-based; map to 0-based vector index
+        UINT idx = mii.wID - 1;
+        if (idx < g_menuItems->count && !g_menuItems->items[idx].icon) {
+            HBITMAP icon = CachedIconForItem(g_menuItems->items[idx].path);
+            g_menuItems->items[idx].icon = icon;
+            mii.fMask    = MIIM_BITMAP;
+            mii.hbmpItem = icon;
+            SetMenuItemInfoW(hMenu, i, TRUE, &mii);
+        }
+    }
+
+    // Restore the cursor that was active before icon resolution
+    SetCursor(hPrev);
+
+    return 0;
 }
 
 
