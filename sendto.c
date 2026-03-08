@@ -42,7 +42,6 @@ static HDC hdcIconCache = NULL;
 /* -------------------------------------------------------------------------- */
 
 #define SAFE_RELEASE(p)     do { if (p) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
-#define RETURN_IF_FAILED(h) do { HRESULT _hr = (h); if (FAILED(_hr)) return _hr; } while (0)
 #define ERR_BOX(msg)        MessageBoxW(NULL, msg, L"SendTo+", MB_OK|MB_ICONERROR)
 
 
@@ -101,11 +100,11 @@ static void OptInDarkPopupMenus(void)
 /**
  * MenuEntry – one "Send To" item.
  *
- * @member path  Heap-alloc'd absolute path (owner).
+ * @member path  Heap-alloc'd absolute path via _wcsdup (owner; freed by VectorDestroy).
  * @member icon  32-bit ARGB bitmap for the menu (may be NULL).
  */
 typedef struct {
-    WCHAR   path[MAX_LOCAL_PATH];
+    PWSTR   path;
     HBITMAP icon;
 } MenuEntry;
 
@@ -138,7 +137,7 @@ static MenuVector *g_menuItems = NULL;
 static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 {
     if (need <= vec->capacity) {
-        return TRUE;
+        return true;
     }
 
     // Amortized growth: double current capacity (or start at 64), but at least 'need'
@@ -149,7 +148,7 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
 
     MenuEntry *tmp = realloc(vec->items, newCap * sizeof *tmp);
     if (!tmp) {
-        return FALSE;
+        return false;
     }
 
     // Zero the new tail so later clean-up is safe.
@@ -159,7 +158,7 @@ static bool VectorEnsureCapacity(MenuVector *vec, UINT need)
     vec->items    = tmp;
     vec->capacity = newCap;
 
-    return TRUE;
+    return true;
 }
 
 /**
@@ -175,15 +174,20 @@ static bool VectorPush(MenuVector *vec, PCWSTR path, HBITMAP icon)
 {
     // If capacity growth fails, we do *not* consume the resources.
     if (!VectorEnsureCapacity(vec, vec->count + 1)) {
-        return FALSE;
+        return false;
     }
 
-    // MSVC C compiler lacks compound literals → assign field-by-field.
-    StringCchCopyW(vec->items[vec->count].path, MAX_LOCAL_PATH, path);
+    // Heap-duplicate the path string; caller retains no ownership.
+    PWSTR dupPath = _wcsdup(path);
+    if (!dupPath) {
+        return false;
+    }
+
+    vec->items[vec->count].path = dupPath;
     vec->items[vec->count].icon = icon;
     vec->count++;
 
-    return TRUE;
+    return true;
 }
 
 /**
@@ -194,6 +198,7 @@ static bool VectorPush(MenuVector *vec, PCWSTR path, HBITMAP icon)
 static void VectorDestroy(MenuVector *vec)
 {
     for (UINT i = 0; i < vec->count; ++i) {
+        free(vec->items[i].path);
         if (vec->items[i].icon) {
             DeleteObject(vec->items[i].icon);
         }
@@ -374,7 +379,7 @@ typedef struct {
 static IconCache g_iconCache = { 0 };
 
 /** Whether persistent icon caching is enabled (set via /C flag). */
-static bool g_useCacheFlag = FALSE;
+static bool g_useCacheFlag = false;
 
 /**
  * GetFileLastWriteTime – retrieve the last-write FILETIME for a path.
@@ -587,6 +592,40 @@ static void IconCacheDestroy(void)
 }
 
 /**
+ * IconCacheEnsureCapacity – make room for at least @need entries in g_iconCache.
+ *
+ * Mirrors the amortised-doubling strategy of VectorEnsureCapacity, starting
+ * at 128 slots when the cache is empty.
+ *
+ * @param need  Desired minimum capacity.
+ * @return      true on success, false on OOM (existing data is untouched).
+ */
+static bool IconCacheEnsureCapacity(UINT need)
+{
+    if (need <= g_iconCache.capacity) {
+        return true;
+    }
+
+    UINT newCap = g_iconCache.capacity ? g_iconCache.capacity * 2 : 128;
+    if (newCap < need) {
+        newCap = need;
+    }
+
+    IconCacheEntry *tmp = realloc(g_iconCache.entries, newCap * sizeof *tmp);
+    if (!tmp) {
+        return false;
+    }
+
+    ZeroMemory(tmp + g_iconCache.capacity,
+               (newCap - g_iconCache.capacity) * sizeof *tmp);
+
+    g_iconCache.entries  = tmp;
+    g_iconCache.capacity = newCap;
+
+    return true;
+}
+
+/**
  * IconCacheLookup – search for a cached icon matching @path and its current
  *                   last-write timestamp.
  *
@@ -678,22 +717,14 @@ static void IconCacheStore(PCWSTR path, HBITMAP hbm)
         e->width     = bm.bmWidth;
         e->height    = bm.bmHeight;
         e->pixels    = pixels;
-        g_iconCache.dirty = TRUE;
+        g_iconCache.dirty = true;
         return;
     }
 
     // new entry — grow array if needed
-    if (g_iconCache.count >= g_iconCache.capacity) {
-        UINT newCap = g_iconCache.capacity ? g_iconCache.capacity * 2 : 128;
-        IconCacheEntry *tmp = realloc(g_iconCache.entries, newCap * sizeof *tmp);
-        if (!tmp) {
-            free(pixels);
-            return;
-        }
-        ZeroMemory(tmp + g_iconCache.capacity,
-                   (newCap - g_iconCache.capacity) * sizeof *tmp);
-        g_iconCache.entries  = tmp;
-        g_iconCache.capacity = newCap;
+    if (!IconCacheEnsureCapacity(g_iconCache.count + 1)) {
+        free(pixels);
+        return;
     }
 
     IconCacheEntry *e = &g_iconCache.entries[g_iconCache.count++];
@@ -702,7 +733,7 @@ static void IconCacheStore(PCWSTR path, HBITMAP hbm)
     e->width     = bm.bmWidth;
     e->height    = bm.bmHeight;
     e->pixels    = pixels;
-    g_iconCache.dirty = TRUE;
+    g_iconCache.dirty = true;
 }
 
 /**
@@ -1073,7 +1104,37 @@ static void AddDirectoryItem(
 }
 
 /**
- * EnumerateFolder – recursively enumerate a directory and add entries to a menu.
+ * CompareFindData – qsort comparator for WIN32_FIND_DATAW entries.
+ *
+ * Sorts directories before files; within each group, sorts by file name
+ * using StrCmpLogicalW (natural ordering: file1, file2, file10).
+ *
+ * @param a  Pointer to first WIN32_FIND_DATAW.
+ * @param b  Pointer to second WIN32_FIND_DATAW.
+ * @return   Negative if a < b, zero if equal, positive if a > b.
+ */
+static int CompareFindData(const void *a, const void *b)
+{
+    const WIN32_FIND_DATAW *fa = (const WIN32_FIND_DATAW *)a;
+    const WIN32_FIND_DATAW *fb = (const WIN32_FIND_DATAW *)b;
+
+    BOOL dirA = (fa->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    BOOL dirB = (fb->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    // directories come first
+    if (dirA != dirB) {
+        return dirB - dirA;
+    }
+
+    return StrCmpLogicalW(fa->cFileName, fb->cFileName);
+}
+
+/**
+ * EnumerateFolder – recursively enumerate a directory, sort the entries
+ *                   alphabetically (directories first), and add them to a menu.
+ *
+ * Collects all valid entries into a temporary heap array, sorts with
+ * StrCmpLogicalW for natural ordering, then processes them in order.
  *
  * @param menu        HMENU to which items and submenus will be added.
  * @param directory   Wide‐string path of the folder to enumerate.
@@ -1114,19 +1175,52 @@ static HRESULT EnumerateFolder(
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
+    // --- Phase 1: collect all valid entries into a temporary heap array ---
+    UINT entryCount = 0;
+    UINT entryCapacity = 32;
+    WIN32_FIND_DATAW *entries = malloc(entryCapacity * sizeof *entries);
+    if (!entries) {
+        FindClose(hFind);
+        return E_OUTOFMEMORY;
+    }
+
     do {
-        // Skip "." , "..", hidden, or system entries
         if (SkipEntry(&findData)) {
             continue;
         }
 
+        // grow array if needed
+        if (entryCount >= entryCapacity) {
+            UINT newCap = entryCapacity * 2;
+            WIN32_FIND_DATAW *tmp = realloc(entries, newCap * sizeof *tmp);
+            if (!tmp) {
+                break;  // process what we have so far
+            }
+            entries = tmp;
+            entryCapacity = newCap;
+        }
+
+        entries[entryCount++] = findData;
+    } while (FindNextFileW(hFind, &findData));
+
+    FindClose(hFind);
+
+    // --- Phase 2: sort — directories first, then alphabetical within each group ---
+    if (entryCount > 1) {
+        qsort(entries, entryCount, sizeof *entries, CompareFindData);
+    }
+
+    // --- Phase 3: add sorted entries to the menu and vector ---
+    for (UINT i = 0; i < entryCount; ++i) {
+        WIN32_FIND_DATAW *entry = &entries[i];
+
         // Build full child path
         WCHAR childPath[MAX_LOCAL_PATH];
-        if (!PathCombineW(childPath, directory, findData.cFileName)) {
+        if (!PathCombineW(childPath, directory, entry->cFileName)) {
             continue;
         }
 
-        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if (entry->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // For subdirectories, create a new submenu
             HMENU subMenu = CreatePopupMenu();
             if (!subMenu) {
@@ -1137,7 +1231,7 @@ static HRESULT EnumerateFolder(
             HBITMAP icon = CachedIconForItem(childPath);
 
             // Insert directory item with icon and context-help ID
-            AddDirectoryItem(menu, findData.cFileName,
+            AddDirectoryItem(menu, entry->cFileName,
                              icon, subMenu, *nextCmdId);
 
             // Store in vector for later invocation
@@ -1151,14 +1245,12 @@ static HRESULT EnumerateFolder(
             HBITMAP icon = NULL;
 
             // For files, insert a regular file item
-            AddFileItem(menu, findData.cFileName, icon, (*nextCmdId)++,
+            AddFileItem(menu, entry->cFileName, icon, (*nextCmdId)++,
                         items, childPath);
         }
+    }
 
-    } while (FindNextFileW(hFind, &findData));
-
-    // Clean up enumeration handle
-    FindClose(hFind);
+    free(entries);
 
     return S_OK;
 }
@@ -1489,14 +1581,14 @@ static bool ParseCommandLine(
     PWSTR   **outArgv
 ) {
     *outDir      = NULL;
-    *outUseCache = FALSE;
+    *outUseCache = false;
     *outArgc     = 1;                   // always keep exe @ index 0
     *outArgv     = NULL;
 
     // allocate worst-case full array
     PWSTR *temp = malloc(rawArgc * sizeof *temp);
     if (!temp) {
-        return FALSE;
+        return false;
     }
 
     // keep program name
@@ -1532,7 +1624,7 @@ static bool ParseCommandLine(
 
         // enable persistent icon cache?
         if (_wcsicmp(param, L"/C")==0) {
-            *outUseCache = TRUE;
+            *outUseCache = true;
             continue;
         }
 
@@ -1549,7 +1641,7 @@ static bool ParseCommandLine(
     }
 
     *outArgv = temp;
-    return TRUE;
+    return true;
 
 failed:
     // clean up /D allocation if it was set before the error
@@ -1557,7 +1649,7 @@ failed:
     *outDir = NULL;
 
     free(temp);
-    return FALSE;
+    return false;
 }
 
 /**
@@ -1792,6 +1884,10 @@ static void HandleSendFiles(HWND owner, const MenuEntry *item, int argc, PWSTR *
         0,                          // all threads
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
     );
+    if (!foregroundHook) {
+        OutputDebugStringW(L"[SendTo+] SetWinEventHook failed; "
+                           L"target window may stay in background\n");
+    }
 
     // Perform the actual COM drag-and-drop operation
     ExecuteDragDrop(owner, item, argc, argv);
@@ -1882,7 +1978,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
     int cleanArgc        = 0;
     PWSTR *cleanArgv     = NULL;
     PWSTR sendToDir      = NULL;
-    bool useCache        = FALSE;
+    bool useCache        = false;
     HMENU popupMenu      = NULL;
     HWND owner           = NULL;
     MenuVector menuItems = { 0 };
