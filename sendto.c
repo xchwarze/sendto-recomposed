@@ -757,77 +757,6 @@ static HWND FindMainWindowByPid(DWORD pid)
 }
 
 /**
- * FindExplorerWindowCtx – EnumWindows callback context for FindExplorerWindowByPath.
- *
- * @member path    Target folder path whose name to match against window titles.
- * @member result  Receives the first matching CabinetWClass HWND, or NULL.
- */
-typedef struct {
-    PCWSTR path;
-    HWND   result;
-} FindExplorerWindowCtx;
-
-/**
- * FindExplorerWindowCb – EnumWindows callback: finds a CabinetWClass (Explorer
- *                        folder) window whose title matches the last component
- *                        of @ctx->path.
- *
- * This is a best-effort heuristic.  Explorer sets its title to the folder name,
- * so comparing titles covers the common case.  Renamed or virtual windows will
- * not match — the caller falls back gracefully when result stays NULL.
- *
- * @param hwnd  Handle to the window currently being enumerated.
- * @param lp    Pointer to a FindExplorerWindowCtx cast to LPARAM.
- * @return      FALSE to stop enumeration (match found), TRUE to continue.
- */
-static BOOL CALLBACK FindExplorerWindowCb(HWND hwnd, LPARAM lp)
-{
-    FindExplorerWindowCtx *ctx = (FindExplorerWindowCtx *)lp;
-
-    // only consider Explorer folder windows (CabinetWClass)
-    WCHAR className[64];
-    if (!GetClassNameW(hwnd, className, ARRAYSIZE(className))) {
-        return TRUE;
-    }
-    if (_wcsicmp(className, L"CabinetWClass") != 0) {
-        return TRUE;
-    }
-
-    // compare window title against the last path component (no extension)
-    WCHAR title[MAX_PATH];
-    if (!GetWindowTextW(hwnd, title, ARRAYSIZE(title))) {
-        return TRUE;
-    }
-
-    WCHAR folderName[MAX_PATH];
-    StringCchCopyW(folderName, ARRAYSIZE(folderName), ctx->path);
-    PathStripPathW(folderName);
-    PathRemoveExtensionW(folderName);
-
-    if (_wcsicmp(title, folderName) == 0) {
-        ctx->result = hwnd;
-        return FALSE; // stop enumeration
-    }
-
-    return TRUE;
-}
-
-/**
- * FindExplorerWindowByPath – find an already-open Explorer window showing @path.
- *
- * Uses a window-title heuristic (see FindExplorerWindowCb).
- *
- * @param path  Absolute path of the target folder or .lnk.
- * @return      HWND if a matching Explorer window is found, NULL otherwise.
- */
-static HWND FindExplorerWindowByPath(PCWSTR path)
-{
-    FindExplorerWindowCtx ctx = { path, NULL };
-    EnumWindows(FindExplorerWindowCb, (LPARAM)&ctx);
-    return ctx.result;
-}
-
-/**
  * ForceWindowToForeground – bring @hwnd to the foreground, bypassing Windows'
  *                           foreground-lock restrictions.
  *
@@ -872,16 +801,10 @@ static void ForceWindowToForeground(HWND hwnd)
  * Retries up to ~2 s to allow slow apps to create their window after idle.
  * Once found, activates it via ForceWindowToForeground.
  *
- * Note: drag-and-drop activation is handled directly in HandleSendFiles via
- * the HWND returned by ExecuteDragDrop (IOleWindow::GetWindow).
- *
- * @param entry     Selected MenuEntry (reserved for future use / logging).
  * @param hProcess  Handle of the newly-spawned process (must be non-NULL).
  */
-static void ActivateTargetWindow(const MenuEntry *entry, HANDLE hProcess)
+static void ActivateTargetWindow(HANDLE hProcess)
 {
-    (void)entry; // reserved — only hProcess is used in this branch
-
     // Wait until the app is ready for input, then find its main window.
     // Retry loop covers apps that create their window slightly after
     // WaitForInputIdle returns.
@@ -897,6 +820,60 @@ static void ActivateTargetWindow(const MenuEntry *entry, HANDLE hProcess)
     }
 
     ForceWindowToForeground(hwndTarget);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Foreground event hook (drag-and-drop activation)                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * HWND captured by the WinEvent hook when a window takes the foreground
+ * during or immediately after a COM drag-and-drop operation.
+ *
+ * Set by ForegroundEventHookProc, consumed by HandleSendFiles.
+ * Protected by single-threaded apartment — no synchronisation needed.
+ */
+static HWND g_dropForegroundHwnd = NULL;
+
+/**
+ * ForegroundEventHookProc – WinEvent callback that records the most recent
+ *                           window to receive foreground activation.
+ *
+ * Installed just before ExecuteDragDrop and uninstalled right after the
+ * message-pump wait.  Captures any window that the shell (or the launched
+ * application) activates as a result of the drop operation, covering both
+ * new processes and already-running apps that merely raise their window.
+ *
+ * @param hWinEventHook  Handle to the installed event hook (unused).
+ * @param event          Event constant (always EVENT_SYSTEM_FOREGROUND here).
+ * @param hwnd           Window that received the foreground.
+ * @param idObject       Object identifier (unused).
+ * @param idChild        Child identifier (unused).
+ * @param dwEventThread  Thread that generated the event (unused).
+ * @param dwmsEventTime  Timestamp of the event in milliseconds (unused).
+ */
+static void CALLBACK ForegroundEventHookProc(
+    HWINEVENTHOOK hWinEventHook,
+    DWORD         event,
+    HWND          hwnd,
+    LONG          idObject,
+    LONG          idChild,
+    DWORD         dwEventThread,
+    DWORD         dwmsEventTime
+) {
+    // suppress unused-parameter warnings
+    (void)hWinEventHook;
+    (void)event;
+    (void)idObject;
+    (void)idChild;
+    (void)dwEventThread;
+    (void)dwmsEventTime;
+
+    // only record visible top-level windows (ignore transient popups)
+    if (hwnd && IsWindowVisible(hwnd)) {
+        g_dropForegroundHwnd = hwnd;
+    }
 }
 
 
@@ -1350,23 +1327,17 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
 
 /**
  * ExecuteDragDrop - Perform a COM drag-and-drop of the files passed in argv[1…argc-1]
- *                  and return the HWND of the drop-target window.
- *
- * The drop-target HWND is obtained via IOleWindow::GetWindow() before the drop
- * is performed, so it is always the exact destination window — no heuristics.
- * Returns NULL if the interface is unavailable (non-windowed drop targets).
+ *                   onto the target described by @entry.
  *
  * @param owner   HWND of the hidden owner window for COM calls.
  * @param entry   Pointer to the MenuEntry containing the target .path.
  * @param argc    Argument count (program name + file paths).
  * @param argv    Array of PWSTR; argv[1…] are source file paths.
- * @return        HWND of the drop-target window, or NULL on failure.
  */
-static HWND ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR *argv)
+static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR *argv)
 {
     IDataObject *pDataObj    = NULL;
     IDropTarget *pDropTarget = NULL;
-    HWND hwndDropTarget      = NULL;
 
     // Build IDataObject from the array of source file paths
     HRESULT hr = GetShellInterfaceForPaths(
@@ -1377,7 +1348,7 @@ static HWND ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
         (void**)&pDataObj
     );
     if (FAILED(hr) || !pDataObj) {
-        return NULL;
+        return;
     }
 
     // Retrieve the IDropTarget for the destination folder/link
@@ -1390,24 +1361,12 @@ static HWND ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
     );
 
     if (SUCCEEDED(hr) && pDropTarget) {
-        // Query the exact destination HWND via IOleWindow before performing
-        // the drop — this avoids all heuristics for foreground activation.
-        IOleWindow *pOleWindow = NULL;
-        if (SUCCEEDED(pDropTarget->lpVtbl->QueryInterface(
-                pDropTarget, &IID_IOleWindow, (void **)&pOleWindow))) {
-            pOleWindow->lpVtbl->GetWindow(pOleWindow, &hwndDropTarget);
-            pOleWindow->lpVtbl->Release(pOleWindow);
-        }
-
-        // Perform the actual drag-and-drop
         ExecuteDropOperation(pDataObj, pDropTarget);
         SAFE_RELEASE(pDropTarget);
     }
 
     // Clean up the data object
     SAFE_RELEASE(pDataObj);
-
-    return hwndDropTarget;
 }
 
 
@@ -1559,7 +1518,7 @@ failed:
  */
 static PWSTR ResolveSendToDirectory(void)
 {
-	// get path to our own executable
+    // get path to our own executable
     WCHAR exeFolder[MAX_PATH];
     if (!GetModuleFileNameW(NULL, exeFolder, ARRAYSIZE(exeFolder))) {
         OutputDebugStringW(L"[SendTo+] GetModuleFileNameW failed\n");
@@ -1614,14 +1573,6 @@ static BOOL BuildSendToMenu(PCWSTR sendToDir, HMENU *outPopup, MenuVector *outIt
     // create empty popup
     *outPopup = CreatePopupMenu();
     *outItems = (MenuVector){ 0 };
-
-    // enable bitmap arrows (chevrons) AND auto-dismiss on click-outside
-    /*MENUINFO menuInfo = { sizeof(menuInfo) };
-    menuInfo.fMask   = MIM_STYLE;
-    menuInfo.dwStyle = MNS_CHECKORBMP     // draw ► for submenus
-                       | MNS_AUTODISMISS  // close when clicking outside
-                       | MNS_NOTIFYBYPOS; // get position notifications
-    SetMenuInfo(*outPopup, &menuInfo);*/
 
     // pre-reserve capacity in one go to avoid repeated reallocs
     VectorEnsureCapacity(outItems, MENU_POOL_SIZE);
@@ -1748,7 +1699,7 @@ static void HandleOpenTarget(HWND owner, const MenuEntry *item)
     if (ShellExecuteExW(&sei) && sei.hProcess) {
         // Wait for the new process to create its window, then
         // force it to the foreground like any normal menu action.
-        ActivateTargetWindow(item, sei.hProcess);
+        ActivateTargetWindow(sei.hProcess);
         CloseHandle(sei.hProcess);
     }
 }
@@ -1757,10 +1708,14 @@ static void HandleOpenTarget(HWND owner, const MenuEntry *item)
  * HandleSendFiles – drag-and-drop branch: send @argv[1…] to the selected
  *                   target and bring its window to the foreground.
  *
- * ExecuteDragDrop queries the drop target for IOleWindow::GetWindow() and
- * returns the exact destination HWND — no title heuristics needed.
- * Falls back to FindExplorerWindowByPath if IOleWindow is unavailable
- * (e.g. non-windowed or virtual drop targets).
+ * Uses a SetWinEventHook to listen for EVENT_SYSTEM_FOREGROUND events
+ * during and immediately after the COM drop operation.  This is event-driven
+ * (no process snapshots, no title heuristics) and covers both newly-launched
+ * processes and already-running apps that simply raise their existing window.
+ *
+ * The hook is installed before the drop and torn down after a short
+ * message-pump wait, which gives the shell enough time to launch the target
+ * application and have it take the foreground.
  *
  * @param owner  HWND of the hidden owner window (used as COM context).
  * @param item   Selected MenuEntry whose .path is the drop-target folder/app.
@@ -1771,17 +1726,45 @@ static void HandleSendFiles(HWND owner, const MenuEntry *item, int argc, PWSTR *
 {
     OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
 
-    // Allow the drop-target process to call SetForegroundWindow on itself if it wants to.
+    // Allow the drop-target process to call SetForegroundWindow on itself
     AllowSetForegroundWindow(ASFW_ANY);
 
-    // ExecuteDragDrop returns the exact HWND of the drop target via IOleWindow::GetWindow.
-    // If unavailable (non-windowed target), fall back to the Explorer title heuristic.
-    HWND hwndTarget = ExecuteDragDrop(owner, item, argc, argv);
-    if (!hwndTarget) {
-        hwndTarget = FindExplorerWindowByPath(item->path);
+    // Reset the shared HWND that the hook callback will populate
+    g_dropForegroundHwnd = NULL;
+
+    // Install an event hook that captures any foreground activation caused
+    // by the drop (works for new processes and existing windows alike)
+    HWINEVENTHOOK foregroundHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,    // eventMin
+        EVENT_SYSTEM_FOREGROUND,    // eventMax
+        NULL,                       // no DLL – callback lives in this process
+        ForegroundEventHookProc,    // callback
+        0,                          // all processes
+        0,                          // all threads
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
+    );
+
+    // Perform the actual COM drag-and-drop operation
+    ExecuteDragDrop(owner, item, argc, argv);
+
+    // Pump messages briefly so the hook callback can fire.
+    // The shell may need a moment to launch the target process and have it
+    // call SetForegroundWindow, so we poll up to ~2 s (40 × 50 ms).
+    for (int waitCycle = 0; waitCycle < 40 && !g_dropForegroundHwnd; ++waitCycle) {
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            DispatchMessage(&msg);
+        }
+        Sleep(50);
     }
 
-    ForceWindowToForeground(hwndTarget);
+    // Tear down the hook now that we have (or timed-out waiting for) the HWND
+    if (foregroundHook) {
+        UnhookWinEvent(foregroundHook);
+    }
+
+    // Force the captured window to the foreground in case Windows demoted it
+    ForceWindowToForeground(g_dropForegroundHwnd);
 }
 
 /**
@@ -1854,38 +1837,38 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         return EXIT_FAILURE;
     }
 
-	// build popup menu and items
+    // build popup menu and items
     HMENU popupMenu;
     MenuVector menuItems;
     if (!BuildSendToMenu(sendToDir, &popupMenu, &menuItems)) {
         return EXIT_FAILURE;
     }
 
-	// create hidden owner window
+    // create hidden owner window
     HWND owner = CreateHiddenOwnerWindow(hInstance);
     if (!owner) {
         return EXIT_FAILURE;
     }
 
-	// display menu and handle selection
+    // display menu and handle selection
     g_menuItems = &menuItems;
     UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
 
         if (cleanArgc > 1) {
-			// with args: perform drag-and-drop
+            // with args: perform drag-and-drop
             HandleSendFiles(owner, item, cleanArgc, cleanArgv);
         } else {
-			// no args: open folder/link
+            // no args: open folder/link
             HandleOpenTarget(owner, item);
         }
     }
 
-	// persist icon cache to disk if it was modified
+    // persist icon cache to disk if it was modified
     TeardownIconCache();
 
-	// release COM desktop folder
+    // release COM desktop folder
     ShutdownApplication();
 
     return EXIT_SUCCESS;
