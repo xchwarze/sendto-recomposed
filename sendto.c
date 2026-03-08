@@ -702,6 +702,225 @@ static HBITMAP CachedIconForItem(PCWSTR filePath)
 
 
 /* -------------------------------------------------------------------------- */
+/* Foreground window helpers                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * FindMainWindowCtx – EnumWindows callback context for FindMainWindowByPid.
+ *
+ * @member pid     Target process ID to search for.
+ * @member result  Receives the first matching HWND, or NULL if not found yet.
+ */
+typedef struct {
+    DWORD pid;
+    HWND  result;
+} FindMainWindowCtx;
+
+/**
+ * FindMainWindowCb – EnumWindows callback: finds the first visible, ownerless
+ *                    top-level window belonging to @ctx->pid.
+ *
+ * "Main window" heuristic: visible + no owner + matching PID.
+ * Stops enumeration as soon as a match is found.
+ *
+ * @param hwnd  Handle to the window currently being enumerated.
+ * @param lp    Pointer to a FindMainWindowCtx cast to LPARAM.
+ * @return      FALSE to stop enumeration (match found), TRUE to continue.
+ */
+static BOOL CALLBACK FindMainWindowCb(HWND hwnd, LPARAM lp)
+{
+    FindMainWindowCtx *ctx = (FindMainWindowCtx *)lp;
+
+    DWORD wPid = 0;
+    GetWindowThreadProcessId(hwnd, &wPid);
+
+    // visible, no owner, owned by the target PID → this is the main window
+    if (wPid == ctx->pid && IsWindowVisible(hwnd) && !GetWindow(hwnd, GW_OWNER)) {
+        ctx->result = hwnd;
+        return FALSE; // stop enumeration
+    }
+
+    return TRUE;
+}
+
+/**
+ * FindMainWindowByPid – locate the main visible top-level window of a process.
+ *
+ * @param pid  Process ID to search for.
+ * @return     HWND on success, NULL if no matching window was found.
+ */
+static HWND FindMainWindowByPid(DWORD pid)
+{
+    FindMainWindowCtx ctx = { pid, NULL };
+    EnumWindows(FindMainWindowCb, (LPARAM)&ctx);
+    return ctx.result;
+}
+
+/**
+ * FindExplorerWindowCtx – EnumWindows callback context for FindExplorerWindowByPath.
+ *
+ * @member path    Target folder path whose name to match against window titles.
+ * @member result  Receives the first matching CabinetWClass HWND, or NULL.
+ */
+typedef struct {
+    PCWSTR path;
+    HWND   result;
+} FindExplorerWindowCtx;
+
+/**
+ * FindExplorerWindowCb – EnumWindows callback: finds a CabinetWClass (Explorer
+ *                        folder) window whose title matches the last component
+ *                        of @ctx->path.
+ *
+ * This is a best-effort heuristic.  Explorer sets its title to the folder name,
+ * so comparing titles covers the common case.  Renamed or virtual windows will
+ * not match — the caller falls back gracefully when result stays NULL.
+ *
+ * @param hwnd  Handle to the window currently being enumerated.
+ * @param lp    Pointer to a FindExplorerWindowCtx cast to LPARAM.
+ * @return      FALSE to stop enumeration (match found), TRUE to continue.
+ */
+static BOOL CALLBACK FindExplorerWindowCb(HWND hwnd, LPARAM lp)
+{
+    FindExplorerWindowCtx *ctx = (FindExplorerWindowCtx *)lp;
+
+    // only consider Explorer folder windows (CabinetWClass)
+    WCHAR className[64];
+    if (!GetClassNameW(hwnd, className, ARRAYSIZE(className))) {
+        return TRUE;
+    }
+    if (_wcsicmp(className, L"CabinetWClass") != 0) {
+        return TRUE;
+    }
+
+    // compare window title against the last path component (no extension)
+    WCHAR title[MAX_PATH];
+    if (!GetWindowTextW(hwnd, title, ARRAYSIZE(title))) {
+        return TRUE;
+    }
+
+    WCHAR folderName[MAX_PATH];
+    StringCchCopyW(folderName, ARRAYSIZE(folderName), ctx->path);
+    PathStripPathW(folderName);
+    PathRemoveExtensionW(folderName);
+
+    if (_wcsicmp(title, folderName) == 0) {
+        ctx->result = hwnd;
+        return FALSE; // stop enumeration
+    }
+
+    return TRUE;
+}
+
+/**
+ * FindExplorerWindowByPath – find an already-open Explorer window showing @path.
+ *
+ * Uses a window-title heuristic (see FindExplorerWindowCb).
+ *
+ * @param path  Absolute path of the target folder or .lnk.
+ * @return      HWND if a matching Explorer window is found, NULL otherwise.
+ */
+static HWND FindExplorerWindowByPath(PCWSTR path)
+{
+    FindExplorerWindowCtx ctx = { path, NULL };
+    EnumWindows(FindExplorerWindowCb, (LPARAM)&ctx);
+    return ctx.result;
+}
+
+/**
+ * ForceWindowToForeground – bring @hwnd to the foreground, bypassing Windows'
+ *                           foreground-lock restrictions.
+ *
+ * Windows normally blocks SetForegroundWindow() unless the calling thread
+ * already owns the foreground.  Temporarily attaching our thread's input to
+ * the target thread's input queue satisfies that restriction and lets the
+ * call succeed.
+ *
+ * @param hwnd  Window to activate.  No-op if NULL or no longer valid.
+ */
+static void ForceWindowToForeground(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd)) {
+        return;
+    }
+
+    HWND  hwndFg    = GetForegroundWindow();
+    DWORD fgThread  = hwndFg ? GetWindowThreadProcessId(hwndFg, NULL) : 0;
+    DWORD tgtThread = GetWindowThreadProcessId(hwnd, NULL);
+
+    // attach input queues so SetForegroundWindow is not rejected
+    BOOL attached = FALSE;
+    if (fgThread && fgThread != tgtThread) {
+        attached = AttachThreadInput(fgThread, tgtThread, TRUE);
+    }
+
+    ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+
+    // always detach, even if SetForegroundWindow failed
+    if (attached) {
+        AttachThreadInput(fgThread, tgtThread, FALSE);
+    }
+}
+
+/**
+ * ActivateTargetWindow – find and bring to the foreground the window that
+ *                        should receive focus after a SendTo action.
+ *
+ * Two strategies depending on whether a new process was spawned:
+ *
+ *   @hProcess != NULL  (no-args branch, ShellExecuteExW):
+ *     Wait for the new process to become idle, then locate its main window
+ *     by PID.  Retries up to ~2 s to allow slow apps to create their window.
+ *
+ *   @hProcess == NULL  (drag-drop branch, ExecuteDragDrop):
+ *     The target process already existed.  First try to find an Explorer
+ *     window whose title matches the drop-target folder name; if that fails
+ *     (non-Explorer target: 7-Zip, IDE, …) fall back to whatever window
+ *     became foreground right after the drop.
+ *
+ * In both cases the located window is activated via ForceWindowToForeground.
+ *
+ * @param entry     Selected MenuEntry; its .path is used as the folder hint
+ *                  for the drag-drop branch.
+ * @param hProcess  Handle of the newly-spawned process, or NULL for drag-drop.
+ */
+static void ActivateTargetWindow(const MenuEntry *entry, HANDLE hProcess)
+{
+    HWND hwndTarget = NULL;
+
+    if (hProcess) {
+        // New-process path: wait until the app is ready for input, then find
+        // its main window.  Retry loop covers apps that create their window
+        // slightly after WaitForInputIdle returns.
+        WaitForInputIdle(hProcess, 3000);
+
+        DWORD pid = GetProcessId(hProcess);
+        for (int retry = 0; retry < 20 && !hwndTarget; ++retry) {
+            hwndTarget = FindMainWindowByPid(pid);
+            if (!hwndTarget) {
+                Sleep(100); // 20 × 100 ms = 2 s max wait
+            }
+        }
+    } else {
+        // Drag-drop path: target process already running.
+        // Try to find its Explorer window by folder-name title match.
+        hwndTarget = FindExplorerWindowByPath(entry->path);
+
+        // Fallback for non-Explorer targets (7-Zip, IDEs, etc.): the shell
+        // usually puts the drop-target window in the foreground right after
+        // Drop() returns, so GetForegroundWindow() is a reliable fallback.
+        if (!hwndTarget) {
+            hwndTarget = GetForegroundWindow();
+        }
+    }
+
+    ForceWindowToForeground(hwndTarget);
+}
+
+
+/* -------------------------------------------------------------------------- */
 /* Window procedure                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -1558,15 +1777,33 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 
         // Allow the spawned process to bring its window to the foreground
         AllowSetForegroundWindow(ASFW_ANY);
-        
+
         if (cleanArgc > 1) {
             // with args: perform drag-and-drop
             OutputDebugStringW(L"[SendTo+] with args: perform drag-and-drop\n");
             ExecuteDragDrop(owner, item, cleanArgc, cleanArgv);
+
+            // Activate the drop-target window so it comes to the foreground,
+            // as expected from any standard context-menu "Send To" action.
+            ActivateTargetWindow(item, NULL);
         } else {
             // no args: open folder/link
             OutputDebugStringW(L"[SendTo+] no args: open folder/link\n");
-            ShellExecuteW(NULL, NULL, item->path, NULL, NULL, SW_SHOWNORMAL);
+
+            // Use ShellExecuteExW instead of ShellExecuteW so we can obtain
+            // the process handle and wait for the window to become ready.
+            SHELLEXECUTEINFOW sei  = { sizeof(sei) };
+            sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+            sei.hwnd   = owner;
+            sei.lpFile = item->path;
+            sei.nShow  = SW_SHOWNORMAL;
+
+            if (ShellExecuteExW(&sei) && sei.hProcess) {
+                // Wait for the new process to create its window, then
+                // force it to the foreground like any normal menu action.
+                ActivateTargetWindow(item, sei.hProcess);
+                CloseHandle(sei.hProcess);
+            }
         }
     }
 
