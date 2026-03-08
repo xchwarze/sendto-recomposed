@@ -413,6 +413,10 @@ static BOOL ResolveCacheFilePath(WCHAR outPath[MAX_PATH])
  *
  * Silently succeeds (with zero entries) if the file doesn't exist or is
  * corrupt.  Only entries whose on-disk format matches CACHE_VERSION are loaded.
+ *
+ * On partial reads (corrupt file mid-stream), only the successfully-parsed
+ * entries are kept and capacity is trimmed to match, so IconCacheSave will
+ * not write a stale header count.
  */
 static void IconCacheLoad(void)
 {
@@ -487,14 +491,20 @@ static void IconCacheLoad(void)
 
 done:
     CloseHandle(hFile);
+
+    // Trim capacity to match the number of entries actually loaded.
+    // If the file was truncated mid-stream, capacity was set to the header's
+    // entryCount but only count entries were parsed successfully.  Aligning
+    // the two prevents IconCacheSave from writing a misleading header count.
+    g_iconCache.capacity = g_iconCache.count;
 }
 
 /**
  * IconCacheSave – write the current g_iconCache contents to disk.
  *
  * Only writes if the cache has been marked dirty (new or updated entries).
- * Overwrites the existing cache file atomically is not attempted; a simple
- * truncate-and-rewrite is used.
+ * The header entry-count reflects only entries with valid pixel data, so
+ * the reader will never expect more records than were actually written.
  */
 static void IconCacheSave(void)
 {
@@ -515,15 +525,30 @@ static void IconCacheSave(void)
         return;
     }
 
+    // Count entries with valid pixel data — only these will be serialised.
+    // Entries with NULL pixels (e.g. from a partially-loaded cache or a
+    // failed IconCacheStore) are skipped during writing, so the header must
+    // advertise the real number of records the reader will encounter.
+    DWORD validCount = 0;
+    for (UINT i = 0; i < g_iconCache.count; ++i) {
+        if (g_iconCache.entries[i].pixels) {
+            validCount++;
+        }
+    }
+
+    if (validCount == 0) {
+        CloseHandle(hFile);
+        return;
+    }
+
     DWORD written;
 
     // write header
     DWORD magic   = CACHE_MAGIC;
     DWORD version = CACHE_VERSION;
-    DWORD count   = g_iconCache.count;
-    WriteFile(hFile, &magic,   sizeof magic,   &written, NULL);
-    WriteFile(hFile, &version, sizeof version, &written, NULL);
-    WriteFile(hFile, &count,   sizeof count,   &written, NULL);
+    WriteFile(hFile, &magic,      sizeof magic,      &written, NULL);
+    WriteFile(hFile, &version,    sizeof version,    &written, NULL);
+    WriteFile(hFile, &validCount, sizeof validCount, &written, NULL);
 
     for (UINT i = 0; i < g_iconCache.count; ++i) {
         IconCacheEntry *e = &g_iconCache.entries[i];
@@ -1172,10 +1197,23 @@ static LPITEMIDLIST PathToPIDL(HWND hwndOwner, PCWSTR pszPath)
 }
 
 /**
- * GetShellInterfaceForPIDLs - Given an array of absolute PIDLs, bind to the requested COM
+ * GetShellInterfaceForPIDLs – bind an array of absolute PIDLs to a COM interface
+ *                             obtained from their common parent shell folder.
+ *
+ * IMPORTANT: all PIDLs in @pidlArray MUST reside in the same parent folder.
+ * The function calls SHBindToParent on each PIDL but only keeps the *last*
+ * parent IShellFolder, then passes every child-relative ID to that single
+ * folder's GetUIObjectOf.  If the PIDLs come from different parents, the
+ * child IDs from earlier iterations will be meaningless in the context of
+ * the last parent and GetUIObjectOf will fail or return a corrupt object.
+ *
+ * This is safe for all current callers:
+ *   - IDataObject (source files): Explorer's "Send To" always selects files
+ *     within a single folder view, so all paths share the same parent.
+ *   - IDropTarget (destination):  always called with exactly one path.
  *
  * @param hwndOwner     HWND used for binding context (may be NULL).
- * @param pidlArray     Array of absolute PIDLs.
+ * @param pidlArray     Array of absolute PIDLs (must share same parent folder).
  * @param pidlCount     Number of entries in pidlArray[].
  * @param interfaceId   IID of the desired interface (e.g. IID_IDataObject).
  * @param ppvInterface  Receives the interface pointer; caller must Release().
@@ -1237,7 +1275,11 @@ static HRESULT GetShellInterfaceForPIDLs(
 }
 
 /**
- * GetShellInterfaceForPaths -  Convert an array of file or folder paths into PIDLs
+ * GetShellInterfaceForPaths – convert an array of file or folder paths into
+ *                             PIDLs and bind them to a requested COM interface.
+ *
+ * All paths must reside in the same parent directory (see the same-parent
+ * constraint documented in GetShellInterfaceForPIDLs).
  *
  * @param hwndOwner     Window handle used as context for PIDL parsing.
  * @param paths         Array of wide-string file/folder paths.
