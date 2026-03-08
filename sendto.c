@@ -865,54 +865,34 @@ static void ForceWindowToForeground(HWND hwnd)
 }
 
 /**
- * ActivateTargetWindow – find and bring to the foreground the window that
- *                        should receive focus after a SendTo action.
+ * ActivateTargetWindow – find and bring to the foreground the window of a
+ *                        newly-spawned process (no-args / HandleOpenTarget branch).
  *
- * Two strategies depending on whether a new process was spawned:
+ * Waits for @hProcess to become idle, then locates its main window by PID.
+ * Retries up to ~2 s to allow slow apps to create their window after idle.
+ * Once found, activates it via ForceWindowToForeground.
  *
- *   @hProcess != NULL  (no-args branch, ShellExecuteExW):
- *     Wait for the new process to become idle, then locate its main window
- *     by PID.  Retries up to ~2 s to allow slow apps to create their window.
+ * Note: drag-and-drop activation is handled directly in HandleSendFiles via
+ * the HWND returned by ExecuteDragDrop (IOleWindow::GetWindow).
  *
- *   @hProcess == NULL  (drag-drop branch, ExecuteDragDrop):
- *     The target process already existed.  First try to find an Explorer
- *     window whose title matches the drop-target folder name; if that fails
- *     (non-Explorer target: 7-Zip, IDE, …) fall back to whatever window
- *     became foreground right after the drop.
- *
- * In both cases the located window is activated via ForceWindowToForeground.
- *
- * @param entry     Selected MenuEntry; its .path is used as the folder hint
- *                  for the drag-drop branch.
- * @param hProcess  Handle of the newly-spawned process, or NULL for drag-drop.
+ * @param entry     Selected MenuEntry (reserved for future use / logging).
+ * @param hProcess  Handle of the newly-spawned process (must be non-NULL).
  */
 static void ActivateTargetWindow(const MenuEntry *entry, HANDLE hProcess)
 {
+    (void)entry; // reserved — only hProcess is used in this branch
+
+    // Wait until the app is ready for input, then find its main window.
+    // Retry loop covers apps that create their window slightly after
+    // WaitForInputIdle returns.
+    WaitForInputIdle(hProcess, 3000);
+
     HWND hwndTarget = NULL;
-
-    if (hProcess) {
-        // New-process path: wait until the app is ready for input, then find
-        // its main window.  Retry loop covers apps that create their window
-        // slightly after WaitForInputIdle returns.
-        WaitForInputIdle(hProcess, 3000);
-
-        DWORD pid = GetProcessId(hProcess);
-        for (int retry = 0; retry < 20 && !hwndTarget; ++retry) {
-            hwndTarget = FindMainWindowByPid(pid);
-            if (!hwndTarget) {
-                Sleep(100); // 20 × 100 ms = 2 s max wait
-            }
-        }
-    } else {
-        // Drag-drop path: target process already running.
-        // Try to find its Explorer window by folder-name title match.
-        hwndTarget = FindExplorerWindowByPath(entry->path);
-
-        // Fallback for non-Explorer targets (7-Zip, IDEs, etc.): the shell
-        // usually puts the drop-target window in the foreground right after
-        // Drop() returns, so GetForegroundWindow() is a reliable fallback.
+    DWORD pid = GetProcessId(hProcess);
+    for (int retry = 0; retry < 20 && !hwndTarget; ++retry) {
+        hwndTarget = FindMainWindowByPid(pid);
         if (!hwndTarget) {
-            hwndTarget = GetForegroundWindow();
+            Sleep(100); // 20 × 100 ms = 2 s max wait
         }
     }
 
@@ -1370,16 +1350,23 @@ static void ExecuteDropOperation(IDataObject *dataObj, IDropTarget *dropTarget)
 
 /**
  * ExecuteDragDrop - Perform a COM drag-and-drop of the files passed in argv[1…argc-1]
+ *                  and return the HWND of the drop-target window.
+ *
+ * The drop-target HWND is obtained via IOleWindow::GetWindow() before the drop
+ * is performed, so it is always the exact destination window — no heuristics.
+ * Returns NULL if the interface is unavailable (non-windowed drop targets).
  *
  * @param owner   HWND of the hidden owner window for COM calls.
  * @param entry   Pointer to the MenuEntry containing the target .path.
  * @param argc    Argument count (program name + file paths).
  * @param argv    Array of PWSTR; argv[1…] are source file paths.
+ * @return        HWND of the drop-target window, or NULL on failure.
  */
-static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR *argv)
+static HWND ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR *argv)
 {
     IDataObject *pDataObj    = NULL;
     IDropTarget *pDropTarget = NULL;
+    HWND hwndDropTarget      = NULL;
 
     // Build IDataObject from the array of source file paths
     HRESULT hr = GetShellInterfaceForPaths(
@@ -1390,7 +1377,7 @@ static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
         (void**)&pDataObj
     );
     if (FAILED(hr) || !pDataObj) {
-        return;
+        return NULL;
     }
 
     // Retrieve the IDropTarget for the destination folder/link
@@ -1403,6 +1390,15 @@ static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
     );
 
     if (SUCCEEDED(hr) && pDropTarget) {
+        // Query the exact destination HWND via IOleWindow before performing
+        // the drop — this avoids all heuristics for foreground activation.
+        IOleWindow *pOleWindow = NULL;
+        if (SUCCEEDED(pDropTarget->lpVtbl->QueryInterface(
+                pDropTarget, &IID_IOleWindow, (void **)&pOleWindow))) {
+            pOleWindow->lpVtbl->GetWindow(pOleWindow, &hwndDropTarget);
+            pOleWindow->lpVtbl->Release(pOleWindow);
+        }
+
         // Perform the actual drag-and-drop
         ExecuteDropOperation(pDataObj, pDropTarget);
         SAFE_RELEASE(pDropTarget);
@@ -1410,6 +1406,8 @@ static void ExecuteDragDrop(HWND owner, const MenuEntry *entry, int argc, PWSTR 
 
     // Clean up the data object
     SAFE_RELEASE(pDataObj);
+
+    return hwndDropTarget;
 }
 
 
@@ -1759,9 +1757,10 @@ static void HandleOpenTarget(HWND owner, const MenuEntry *item)
  * HandleSendFiles – drag-and-drop branch: send @argv[1…] to the selected
  *                   target and bring its window to the foreground.
  *
- * Delegates the actual COM drag-and-drop to ExecuteDragDrop, then calls
- * ActivateTargetWindow (hProcess = NULL) to locate and activate the
- * already-running target process.
+ * ExecuteDragDrop queries the drop target for IOleWindow::GetWindow() and
+ * returns the exact destination HWND — no title heuristics needed.
+ * Falls back to FindExplorerWindowByPath if IOleWindow is unavailable
+ * (e.g. non-windowed or virtual drop targets).
  *
  * @param owner  HWND of the hidden owner window (used as COM context).
  * @param item   Selected MenuEntry whose .path is the drop-target folder/app.
@@ -1775,11 +1774,14 @@ static void HandleSendFiles(HWND owner, const MenuEntry *item, int argc, PWSTR *
     // Allow the drop-target process to call SetForegroundWindow on itself if it wants to.
     AllowSetForegroundWindow(ASFW_ANY);
 
-    ExecuteDragDrop(owner, item, argc, argv);
+    // ExecuteDragDrop returns the exact HWND of the drop target via IOleWindow::GetWindow.
+    // If unavailable (non-windowed target), fall back to the Explorer title heuristic.
+    HWND hwndTarget = ExecuteDragDrop(owner, item, argc, argv);
+    if (!hwndTarget) {
+        hwndTarget = FindExplorerWindowByPath(item->path);
+    }
 
-    // Activate the drop-target window so it comes to the foreground,
-    // as expected from any standard context-menu "Send To" action.
-    ActivateTargetWindow(item, NULL);
+    ForceWindowToForeground(hwndTarget);
 }
 
 /**
@@ -1872,18 +1874,18 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
         MenuEntry *item = &menuItems.items[choice - 1];
 
         if (cleanArgc > 1) {
-        	// with args: perform drag-and-drop
+			// with args: perform drag-and-drop
             HandleSendFiles(owner, item, cleanArgc, cleanArgv);
         } else {
-        	// no args: open folder/link
+			// no args: open folder/link
             HandleOpenTarget(owner, item);
         }
     }
 
 	// persist icon cache to disk if it was modified
     TeardownIconCache();
-    
-    // release COM desktop folder
+
+	// release COM desktop folder
     ShutdownApplication();
 
     return EXIT_SUCCESS;
