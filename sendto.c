@@ -205,25 +205,48 @@ static void VectorDestroy(MenuVector *vec)
 /* -------------------------------------------------------------------------- */
 
 /**
- * CreateDIBSection32 – allocate a top-down 32-bit DIB of given size.
+ * InitBitmapInfo32 – fill a BITMAPINFO structure for a top-down 32-bit DIB.
  *
+ * Centralises the BITMAPINFO setup used by CreateDIBSection32, IconCacheLookup,
+ * and IconCacheStore so the format is defined in exactly one place.
+ *
+ * @param bmi     Pointer to BITMAPINFO to initialise (caller-allocated).
  * @param width   Desired bitmap width in pixels.
  * @param height  Desired bitmap height in pixels.
- * @return        New HBITMAP or NULL on failure.
  */
-static HBITMAP CreateDIBSection32(int width, int height)
+static void InitBitmapInfo32(BITMAPINFO *bmi, int width, int height)
 {
-    // Describe a 32-bit top-down DIB
-    BITMAPINFO bmi = { 0 };
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = width;
-    bmi.bmiHeader.biHeight      = -height;  // negative => top-down orientation
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    ZeroMemory(bmi, sizeof *bmi);
+    bmi->bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi->bmiHeader.biWidth       = width;
+    bmi->bmiHeader.biHeight      = -height;  // negative => top-down orientation
+    bmi->bmiHeader.biPlanes      = 1;
+    bmi->bmiHeader.biBitCount    = 32;
+    bmi->bmiHeader.biCompression = BI_RGB;
+}
+
+/**
+ * CreateDIBSection32 – allocate a top-down 32-bit DIB of given size.
+ *
+ * @param width    Desired bitmap width in pixels.
+ * @param height   Desired bitmap height in pixels.
+ * @param outBits  Optional; if non-NULL, receives the pointer to the raw pixel
+ *                 buffer.  Pass NULL when the caller doesn't need direct access
+ *                 (e.g. DibFromIcon, which draws via GDI instead).
+ * @return         New HBITMAP or NULL on failure.
+ */
+static HBITMAP CreateDIBSection32(int width, int height, PVOID *outBits)
+{
+    BITMAPINFO bmi;
+    InitBitmapInfo32(&bmi, width, height);
 
     PVOID pBits = NULL;
-    return CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    HBITMAP hbm = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (outBits) {
+        *outBits = pBits;
+    }
+
+    return hbm;
 }
 
 /**
@@ -254,8 +277,8 @@ static HBITMAP DibFromIcon(HICON iconHandle)
         return NULL;
     }
 
-    // allocate DIB section; pointer to its bits is discarded here
-    HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight);
+    // allocate DIB section; pixel pointer not needed (drawing via GDI)
+    HBITMAP dibBitmap = CreateDIBSection32(bmpMetrics.bmWidth, bmpMetrics.bmHeight, NULL);
     if (dibBitmap) {
         // use global temporary DC
         HGDIOBJ oldObj = SelectObject(hdcIconCache, dibBitmap);
@@ -272,31 +295,13 @@ static HBITMAP DibFromIcon(HICON iconHandle)
 }
 
 /**
- * IconForDirectory – retrieve shell small icon for a directory.
+ * IconForItem – retrieve shell small icon for a file or directory.
  *
- * @param directoryPath  Null-terminated wide string path to a directory.
- * @return               32-bit ARGB HBITMAP, or NULL on failure.
- */
-static HBITMAP IconForDirectory(PCWSTR directoryPath)
-{
-    SHFILEINFOW info = { 0 };
-
-    UINT flags = SHGFI_ICON | SHGFI_SMALLICON;
-    if (SHGetFileInfoW(directoryPath, 0, &info, sizeof(info), flags)) {
-        HBITMAP result = DibFromIcon(info.hIcon);
-        if (result) {
-            return result;
-        }
-    }
-
-    // default for folders
-    return NULL;
-}
-
-/**
- * IconForItem – retrieve shell small icon for a file, with .lnk overlay if needed.
+ * Works for both files and directories: SHGetFileInfoW resolves the
+ * appropriate icon in either case, including custom folder icons set
+ * via desktop.ini and shortcut (.lnk) target icons.
  *
- * @param filePath  Null-terminated wide string path to a file.
+ * @param filePath  Null-terminated wide string path to a file or directory.
  * @return          32-bit ARGB HBITMAP, or NULL on failure.
  */
 static HBITMAP IconForItem(PCWSTR filePath)
@@ -304,7 +309,7 @@ static HBITMAP IconForItem(PCWSTR filePath)
     SHFILEINFOW info;
     UINT flags;
 
-    // Files: get icon, possibly with link overlay
+    // primary: real icon from the shell (resolves .lnk targets, desktop.ini, etc.)
     flags = SHGFI_ICON | SHGFI_SMALLICON;
     if (SHGetFileInfoW(filePath, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), flags)) {
         HBITMAP result = DibFromIcon(info.hIcon);
@@ -417,20 +422,22 @@ static void IconCacheLoad(void)
         cacheFile, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL
     );
+
     if (hFile == INVALID_HANDLE_VALUE) {
         return;
     }
 
-    DWORD bytesRead;
-
     // read and validate header
+    DWORD bytesRead;
     DWORD magic = 0, version = 0, entryCount = 0;
     if (!ReadFile(hFile, &magic, sizeof magic, &bytesRead, NULL) || magic != CACHE_MAGIC) {
         goto done;
     }
+
     if (!ReadFile(hFile, &version, sizeof version, &bytesRead, NULL) || version != CACHE_VERSION) {
         goto done;
     }
+
     if (!ReadFile(hFile, &entryCount, sizeof entryCount, &bytesRead, NULL)) {
         goto done;
     }
@@ -440,8 +447,8 @@ static void IconCacheLoad(void)
     if (!g_iconCache.entries) {
         goto done;
     }
-    g_iconCache.capacity = entryCount;
 
+    g_iconCache.capacity = entryCount;
     for (DWORD i = 0; i < entryCount; ++i) {
         IconCacheEntry *e = &g_iconCache.entries[i];
 
@@ -568,24 +575,25 @@ static HBITMAP IconCacheLookup(PCWSTR path)
 
     for (UINT i = 0; i < g_iconCache.count; ++i) {
         IconCacheEntry *e = &g_iconCache.entries[i];
-        if (_wcsicmp(e->path, path) != 0) continue;
-        if (CompareFileTime(&e->lastWrite, &ft) != 0) continue;
-        if (!e->pixels) continue;
+        if (_wcsicmp(e->path, path) != 0) {
+            continue;
+        }
 
-        // rebuild HBITMAP from cached pixels
-        BITMAPINFO bmi = { 0 };
-        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth       = e->width;
-        bmi.bmiHeader.biHeight      = -(e->height);
-        bmi.bmiHeader.biPlanes      = 1;
-        bmi.bmiHeader.biBitCount    = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
+        if (CompareFileTime(&e->lastWrite, &ft) != 0) {
+            continue;
+        }
 
+        if (!e->pixels) {
+            continue;
+        }
+
+        // rebuild HBITMAP from cached pixels via shared helper
         PVOID pBits = NULL;
-        HBITMAP hbm = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+        HBITMAP hbm = CreateDIBSection32(e->width, e->height, &pBits);
         if (hbm && pBits) {
             memcpy(pBits, e->pixels, (size_t)(e->width * e->height * 4));
         }
+
         return hbm;
     }
 
@@ -619,14 +627,9 @@ static void IconCacheStore(PCWSTR path, HBITMAP hbm)
     BYTE *pixels = malloc(pixelSize);
     if (!pixels) return;
 
-    // extract pixel data from the HBITMAP
-    BITMAPINFO bmi = { 0 };
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = bm.bmWidth;
-    bmi.bmiHeader.biHeight      = -(bm.bmHeight); // top-down
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    // extract pixel data from the HBITMAP via shared helper
+    BITMAPINFO bmi;
+    InitBitmapInfo32(&bmi, bm.bmWidth, bm.bmHeight);
 
     HDC hdc = GetDC(NULL);
     int scanlines = GetDIBits(hdc, hbm, 0, bm.bmHeight, pixels, &bmi, DIB_RGB_COLORS);
@@ -675,11 +678,11 @@ static void IconCacheStore(PCWSTR path, HBITMAP hbm)
 }
 
 /**
- * CachedIconForItem – resolve a file icon, using the persistent cache when
- *                     available.  On cache miss, falls back to IconForItem()
- *                     and stores the result for next time.
+ * CachedIconForItem – resolve a file or directory icon, using the persistent
+ *                     cache when available.  On cache miss, falls back to
+ *                     IconForItem() and stores the result for next time.
  *
- * @param filePath  Null-terminated wide string path to a file.
+ * @param filePath  Null-terminated wide string path to a file or directory.
  * @return          32-bit ARGB HBITMAP, or NULL on failure.
  */
 static HBITMAP CachedIconForItem(PCWSTR filePath)
@@ -690,7 +693,6 @@ static HBITMAP CachedIconForItem(PCWSTR filePath)
     }
 
     HBITMAP icon = IconForItem(filePath);
-
     if (icon && g_useCacheFlag) {
         IconCacheStore(filePath, icon);
     }
@@ -725,8 +727,13 @@ static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         for (int i = 0; i < count; i++) {
             MENUITEMINFOW mii = { sizeof(mii) };
             mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_SUBMENU;
-            if (!GetMenuItemInfoW(hMenu, i, TRUE, &mii)) continue;
-            if (mii.hSubMenu || mii.hbmpItem || mii.wID == 0) continue;
+            if (!GetMenuItemInfoW(hMenu, i, TRUE, &mii)) {
+                continue;
+            }
+
+            if (mii.hSubMenu || mii.hbmpItem || mii.wID == 0) {
+                continue;
+            }
 
             UINT idx = mii.wID - 1;
             if (idx < g_menuItems->count && !g_menuItems->items[idx].icon) {
@@ -911,8 +918,8 @@ static HRESULT EnumerateFolder(
                 continue;
             }
 
-            // Retrieve icon bitmap for this entry
-            HBITMAP icon = IconForDirectory(childPath);
+            // Retrieve icon bitmap via unified cache-aware resolver
+            HBITMAP icon = CachedIconForItem(childPath);
 
             // Insert directory item with icon and context-help ID
             AddDirectoryItem(menu, findData.cFileName,
