@@ -2141,7 +2141,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 
     // display menu and handle selection
     g_menuItems = &menuItems;
-    UINT choice = (popupMenu, owner);
+    UINT choice = DisplaySendToMenu(popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
 
