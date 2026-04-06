@@ -146,25 +146,22 @@ static void EnsureAcrylicProc(void)
 /**
  * IsSystemDarkMode – check if Windows is set to dark app mode.
  *
- * Reads the registry value directly; works on W10 1809+ and W11.
- * Returns FALSE on older builds or if the key doesn't exist.
+ * Uses uxtheme ordinal 132 (ShouldAppsUseDarkMode), the same DLL
+ * already loaded by OptInDarkPopupMenus. No extra libs needed.
  */
 static BOOL IsSystemDarkMode(void)
 {
-    DWORD value = 0;
-    DWORD size  = sizeof(value);
-    LONG lr = RegGetValueW(
-        HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-        L"AppsUseLightTheme",
-        RRF_RT_REG_DWORD,
-        NULL,
-        &value,
-        &size
-    );
- 
-    /* AppsUseLightTheme: 0 = dark, 1 = light */
-    return (lr == ERROR_SUCCESS && value == 0);
+    HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll");
+    if (!hUxTheme) return FALSE;
+
+    typedef BOOL (WINAPI *ShouldAppsUseDarkMode_t)(void);
+    ShouldAppsUseDarkMode_t pShouldAppsUseDarkMode =
+        (ShouldAppsUseDarkMode_t)GetProcAddress(hUxTheme, MAKEINTRESOURCEA(132));
+
+    BOOL dark = pShouldAppsUseDarkMode ? pShouldAppsUseDarkMode() : FALSE;
+
+    FreeLibrary(hUxTheme);
+    return dark;
 }
  
 /**
@@ -227,7 +224,7 @@ static void CALLBACK AcrylicMenuEventProc(
  
     if (idObject != OBJID_WINDOW || !hwnd) return;
  
-    /* Only act on popup menu windows */
+    // Only act on popup menu windows
     WCHAR className[16];
     if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) &&
         wcscmp(className, L"#32768") == 0)
