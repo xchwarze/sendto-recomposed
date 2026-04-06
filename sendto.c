@@ -124,6 +124,9 @@ static SetWindowCompositionAttribute_t pSetWindowCompositionAttribute = NULL;
  
 /** TRUE after first resolution attempt (succeed or fail). */
 static bool g_acrylicResolved = false;
+
+/** Last menu HWND that received acrylic, avoids redundant calls. */
+static HWND lastAcrylicHwnd = NULL;
  
 /**
  * EnsureAcrylicProc – lazy-resolve SetWindowCompositionAttribute from user32.
@@ -199,38 +202,6 @@ static void ApplyAcrylicToWindow(HWND hwnd)
     };
  
     pSetWindowCompositionAttribute(hwnd, &data);
-}
- 
-/**
- * AcrylicMenuEventProc – WinEvent callback that applies acrylic to popup
- *                         menu windows (#32768) as they appear.
- *
- * Installed just before TrackPopupMenuEx, uninstalled right after it returns.
- */
-static void CALLBACK AcrylicMenuEventProc(
-    HWINEVENTHOOK hHook,
-    DWORD         event,
-    HWND          hwnd,
-    LONG          idObject,
-    LONG          idChild,
-    DWORD         dwEventThread,
-    DWORD         dwmsEventTime
-) {
-    (void)hHook;
-    (void)event;
-    (void)idChild;
-    (void)dwEventThread;
-    (void)dwmsEventTime;
- 
-    if (idObject != OBJID_WINDOW || !hwnd) return;
- 
-    // Only act on popup menu windows
-    WCHAR className[16];
-    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) &&
-        wcscmp(className, L"#32768") == 0)
-    {
-        ApplyAcrylicToWindow(hwnd);
-    }
 }
 
 
@@ -1097,6 +1068,17 @@ static void CALLBACK ForegroundEventHookProc(
  */
 static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Acrylic: apply to each menu window once
+    if (msg == WM_ENTERIDLE && wParam == MSGF_MENU) {
+        HWND menuHwnd = (HWND)lParam;
+        if (menuHwnd && menuHwnd != lastAcrylicHwnd) {
+            ApplyAcrylicToWindow(menuHwnd);
+            lastAcrylicHwnd = menuHwnd;
+        }
+
+        return 0;
+    }
+
     // Forward all unhandled messages to the default procedure
     if (msg != WM_INITMENUPOPUP) {
         return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1944,20 +1926,6 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
     // Resolve SetWindowCompositionAttribute (once)
     EnsureAcrylicProc();
  
-    // Install event hook to apply acrylic to menu windows as they appear
-    HWINEVENTHOOK acrylicHook = NULL;
-    if (pSetWindowCompositionAttribute) {
-        acrylicHook = SetWinEventHook(
-            EVENT_OBJECT_SHOW,         /* eventMin */
-            EVENT_OBJECT_SHOW,         /* eventMax */
-            NULL,                      /* no DLL – in-process callback */
-            AcrylicMenuEventProc,      /* callback */
-            GetCurrentProcessId(),     /* only our process */
-            GetCurrentThreadId(),      /* only this thread */
-            WINEVENT_OUTOFCONTEXT
-        );
-    }
- 
     // Get cursor position for menu location
     POINT cursor;
     GetCursorPos(&cursor);
@@ -1969,11 +1937,6 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
         owner,
         NULL
     );
- 
-    // Tear down acrylic hook
-    if (acrylicHook) {
-        UnhookWinEvent(acrylicHook);
-    }
  
     // Exit menu-mode to restore normal input
     PostMessage(owner, WM_NULL, 0, 0);
@@ -2178,7 +2141,7 @@ static int RunSendTo(HINSTANCE hInstance, int argc, PWSTR *argv)
 
     // display menu and handle selection
     g_menuItems = &menuItems;
-    UINT choice = DisplaySendToMenu(popupMenu, owner);
+    UINT choice = (popupMenu, owner);
     if (choice) {
         MenuEntry *item = &menuItems.items[choice - 1];
 
