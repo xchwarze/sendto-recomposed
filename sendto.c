@@ -92,118 +92,6 @@ static void OptInDarkPopupMenus(void)
     FreeLibrary(uxThemeModule);
 }
 
-/* ---- Undocumented types for SetWindowCompositionAttribute ---------------- */
-typedef enum {
-    ACCENT_DISABLED                    = 0,
-    ACCENT_ENABLE_GRADIENT             = 1,
-    ACCENT_ENABLE_TRANSPARENTGRADIENT  = 2,
-    ACCENT_ENABLE_BLURBEHIND           = 3,
-    ACCENT_ENABLE_ACRYLICBLURBEHIND    = 4,   /* acrylic – W10 1809+ / W11  */
-    ACCENT_ENABLE_HOSTBACKDROP         = 5,    /* Mica – W11 only            */
-} ACCENT_STATE;
- 
-typedef struct {
-    ACCENT_STATE AccentState;
-    DWORD        AccentFlags;
-    DWORD        GradientColor;   /* AABBGGRR format */
-    DWORD        AnimationId;
-} ACCENT_POLICY;
- 
-typedef struct {
-    DWORD  Attribute;    /* 19 = WCA_ACCENT_POLICY */
-    PVOID  Data;
-    ULONG  DataSize;
-} WINDOWCOMPOSITIONATTRIBDATA;
- 
-#define WCA_ACCENT_POLICY 19
- 
-typedef BOOL (WINAPI *SetWindowCompositionAttribute_t)(HWND, WINDOWCOMPOSITIONATTRIBDATA *);
- 
-/** Resolved once; NULL if unavailable. */
-static SetWindowCompositionAttribute_t pSetWindowCompositionAttribute = NULL;
- 
-/** TRUE after first resolution attempt (succeed or fail). */
-static bool g_acrylicResolved = false;
-
-/** Last menu HWND that received acrylic, avoids redundant calls. */
-static HWND lastAcrylicHwnd = NULL;
- 
-/**
- * EnsureAcrylicProc – lazy-resolve SetWindowCompositionAttribute from user32.
- *
- * Safe to call many times; only loads once.
- */
-static void EnsureAcrylicProc(void)
-{
-    if (g_acrylicResolved) return;
-    g_acrylicResolved = true;
- 
-    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-    if (hUser32) {
-        pSetWindowCompositionAttribute =
-            (SetWindowCompositionAttribute_t)GetProcAddress(
-                hUser32, "SetWindowCompositionAttribute");
-    }
-}
- 
-/**
- * IsSystemDarkMode – check if Windows is set to dark app mode.
- *
- * Uses uxtheme ordinal 132 (ShouldAppsUseDarkMode), the same DLL
- * already loaded by OptInDarkPopupMenus. No extra libs needed.
- */
-static BOOL IsSystemDarkMode(void)
-{
-    HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll");
-    if (!hUxTheme) return FALSE;
-
-    typedef BOOL (WINAPI *ShouldAppsUseDarkMode_t)(void);
-    ShouldAppsUseDarkMode_t pShouldAppsUseDarkMode =
-        (ShouldAppsUseDarkMode_t)GetProcAddress(hUxTheme, MAKEINTRESOURCEA(132));
-
-    BOOL dark = pShouldAppsUseDarkMode ? pShouldAppsUseDarkMode() : FALSE;
-
-    FreeLibrary(hUxTheme);
-    return dark;
-}
- 
-/**
- * ApplyAcrylicToWindow – set acrylic backdrop on an HWND.
- *
- * @param hwnd   Target window (typically a #32768 menu window).
- */
-static void ApplyAcrylicToWindow(HWND hwnd)
-{
-    if (!pSetWindowCompositionAttribute) return;
- 
-    /*
-     * Tint colour in AABBGGRR:
-     *   Dark mode:   semi-transparent dark    →  0xB0000000
-     *   Light mode:  semi-transparent white   →  0xB0FFFFFF
-     *
-     * Adjust alpha (first byte) to taste:
-     *   0x01 = almost fully transparent (maximum blur)
-     *   0xCC = mostly opaque (subtle blur)
-     *   0xB0 = balanced (matches system menu feel)
-     */
-    DWORD tintColor = IsSystemDarkMode() ? 0xB0000000 : 0xB0FFFFFF;
- 
-    ACCENT_POLICY accent = {
-        .AccentState   = ACCENT_ENABLE_ACRYLICBLURBEHIND,
-        .AccentFlags   = 2,   /* ACCENT_FLAG_DRAW_ALL_BORDERS (undocumented) */
-        .GradientColor = tintColor,
-        .AnimationId   = 0,
-    };
- 
-    WINDOWCOMPOSITIONATTRIBDATA data = {
-        .Attribute = WCA_ACCENT_POLICY,
-        .Data      = &accent,
-        .DataSize  = sizeof(accent),
-    };
- 
-    pSetWindowCompositionAttribute(hwnd, &data);
-}
-
 
 /* -------------------------------------------------------------------------- */
 /* Dynamic array for menu items                                               */
@@ -1068,17 +956,6 @@ static void CALLBACK ForegroundEventHookProc(
  */
 static LRESULT CALLBACK SendToWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    // Acrylic: apply to each menu window once
-    if (msg == WM_ENTERIDLE && wParam == MSGF_MENU) {
-        HWND menuHwnd = (HWND)lParam;
-        if (menuHwnd && menuHwnd != lastAcrylicHwnd) {
-            ApplyAcrylicToWindow(menuHwnd);
-            lastAcrylicHwnd = menuHwnd;
-        }
-
-        return 0;
-    }
-
     // Forward all unhandled messages to the default procedure
     if (msg != WM_INITMENUPOPUP) {
         return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1923,9 +1800,6 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
  */
 static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 {
-    // Resolve SetWindowCompositionAttribute (once)
-    EnsureAcrylicProc();
- 
     // Get cursor position for menu location
     POINT cursor;
     GetCursorPos(&cursor);
