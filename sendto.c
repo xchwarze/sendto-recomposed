@@ -92,6 +92,150 @@ static void OptInDarkPopupMenus(void)
     FreeLibrary(uxThemeModule);
 }
 
+/* ---- Undocumented types for SetWindowCompositionAttribute ---------------- */
+typedef enum {
+    ACCENT_DISABLED                    = 0,
+    ACCENT_ENABLE_GRADIENT             = 1,
+    ACCENT_ENABLE_TRANSPARENTGRADIENT  = 2,
+    ACCENT_ENABLE_BLURBEHIND           = 3,
+    ACCENT_ENABLE_ACRYLICBLURBEHIND    = 4,   /* acrylic – W10 1809+ / W11  */
+    ACCENT_ENABLE_HOSTBACKDROP         = 5,    /* Mica – W11 only            */
+} ACCENT_STATE;
+ 
+typedef struct {
+    ACCENT_STATE AccentState;
+    DWORD        AccentFlags;
+    DWORD        GradientColor;   /* AABBGGRR format */
+    DWORD        AnimationId;
+} ACCENT_POLICY;
+ 
+typedef struct {
+    DWORD  Attribute;    /* 19 = WCA_ACCENT_POLICY */
+    PVOID  Data;
+    ULONG  DataSize;
+} WINDOWCOMPOSITIONATTRIBDATA;
+ 
+#define WCA_ACCENT_POLICY 19
+ 
+typedef BOOL (WINAPI *SetWindowCompositionAttribute_t)(HWND, WINDOWCOMPOSITIONATTRIBDATA *);
+ 
+/** Resolved once; NULL if unavailable. */
+static SetWindowCompositionAttribute_t pSetWindowCompositionAttribute = NULL;
+ 
+/** TRUE after first resolution attempt (succeed or fail). */
+static bool g_acrylicResolved = false;
+ 
+/**
+ * EnsureAcrylicProc – lazy-resolve SetWindowCompositionAttribute from user32.
+ *
+ * Safe to call many times; only loads once.
+ */
+static void EnsureAcrylicProc(void)
+{
+    if (g_acrylicResolved) return;
+    g_acrylicResolved = true;
+ 
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        pSetWindowCompositionAttribute =
+            (SetWindowCompositionAttribute_t)GetProcAddress(
+                hUser32, "SetWindowCompositionAttribute");
+    }
+}
+ 
+/**
+ * IsSystemDarkMode – check if Windows is set to dark app mode.
+ *
+ * Reads the registry value directly; works on W10 1809+ and W11.
+ * Returns FALSE on older builds or if the key doesn't exist.
+ */
+static BOOL IsSystemDarkMode(void)
+{
+    DWORD value = 0;
+    DWORD size  = sizeof(value);
+    LONG lr = RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme",
+        RRF_RT_REG_DWORD,
+        NULL,
+        &value,
+        &size
+    );
+ 
+    /* AppsUseLightTheme: 0 = dark, 1 = light */
+    return (lr == ERROR_SUCCESS && value == 0);
+}
+ 
+/**
+ * ApplyAcrylicToWindow – set acrylic backdrop on an HWND.
+ *
+ * @param hwnd   Target window (typically a #32768 menu window).
+ */
+static void ApplyAcrylicToWindow(HWND hwnd)
+{
+    if (!pSetWindowCompositionAttribute) return;
+ 
+    /*
+     * Tint colour in AABBGGRR:
+     *   Dark mode:   semi-transparent dark    →  0xB0000000
+     *   Light mode:  semi-transparent white   →  0xB0FFFFFF
+     *
+     * Adjust alpha (first byte) to taste:
+     *   0x01 = almost fully transparent (maximum blur)
+     *   0xCC = mostly opaque (subtle blur)
+     *   0xB0 = balanced (matches system menu feel)
+     */
+    DWORD tintColor = IsSystemDarkMode() ? 0xB0000000 : 0xB0FFFFFF;
+ 
+    ACCENT_POLICY accent = {
+        .AccentState   = ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        .AccentFlags   = 2,   /* ACCENT_FLAG_DRAW_ALL_BORDERS (undocumented) */
+        .GradientColor = tintColor,
+        .AnimationId   = 0,
+    };
+ 
+    WINDOWCOMPOSITIONATTRIBDATA data = {
+        .Attribute = WCA_ACCENT_POLICY,
+        .Data      = &accent,
+        .DataSize  = sizeof(accent),
+    };
+ 
+    pSetWindowCompositionAttribute(hwnd, &data);
+}
+ 
+/**
+ * AcrylicMenuEventProc – WinEvent callback that applies acrylic to popup
+ *                         menu windows (#32768) as they appear.
+ *
+ * Installed just before TrackPopupMenuEx, uninstalled right after it returns.
+ */
+static void CALLBACK AcrylicMenuEventProc(
+    HWINEVENTHOOK hHook,
+    DWORD         event,
+    HWND          hwnd,
+    LONG          idObject,
+    LONG          idChild,
+    DWORD         dwEventThread,
+    DWORD         dwmsEventTime
+) {
+    (void)hHook;
+    (void)event;
+    (void)idChild;
+    (void)dwEventThread;
+    (void)dwmsEventTime;
+ 
+    if (idObject != OBJID_WINDOW || !hwnd) return;
+ 
+    /* Only act on popup menu windows */
+    WCHAR className[16];
+    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) &&
+        wcscmp(className, L"#32768") == 0)
+    {
+        ApplyAcrylicToWindow(hwnd);
+    }
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Dynamic array for menu items                                               */
@@ -1800,10 +1944,27 @@ static HWND CreateHiddenOwnerWindow(HINSTANCE hInstance)
  */
 static UINT DisplaySendToMenu(HMENU popup, HWND owner)
 {
-    // get cursor position for menu location
+    // Resolve SetWindowCompositionAttribute (once)
+    EnsureAcrylicProc();
+ 
+    // Install event hook to apply acrylic to menu windows as they appear
+    HWINEVENTHOOK acrylicHook = NULL;
+    if (pSetWindowCompositionAttribute) {
+        acrylicHook = SetWinEventHook(
+            EVENT_OBJECT_SHOW,         /* eventMin */
+            EVENT_OBJECT_SHOW,         /* eventMax */
+            NULL,                      /* no DLL – in-process callback */
+            AcrylicMenuEventProc,      /* callback */
+            GetCurrentProcessId(),     /* only our process */
+            GetCurrentThreadId(),      /* only this thread */
+            WINEVENT_OUTOFCONTEXT
+        );
+    }
+ 
+    // Get cursor position for menu location
     POINT cursor;
     GetCursorPos(&cursor);
-
+ 
     const UINT cmd = TrackPopupMenuEx(
         popup,
         TPM_RETURNCMD | TPM_LEFTALIGN | TPM_LEFTBUTTON,
@@ -1811,10 +1972,15 @@ static UINT DisplaySendToMenu(HMENU popup, HWND owner)
         owner,
         NULL
     );
-
-    // exit menu-mode to restore normal input
+ 
+    // Tear down acrylic hook
+    if (acrylicHook) {
+        UnhookWinEvent(acrylicHook);
+    }
+ 
+    // Exit menu-mode to restore normal input
     PostMessage(owner, WM_NULL, 0, 0);
-
+ 
     return cmd;
 }
 
